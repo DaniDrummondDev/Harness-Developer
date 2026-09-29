@@ -5,8 +5,14 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from orchestrator.core.exceptions import HarnessError, ProviderCallError, ProviderError
+from orchestrator.core.exceptions import (
+    DecisionTimeoutError,
+    HarnessError,
+    ProviderCallError,
+    ProviderError,
+)
 from orchestrator.providers.base import (
+    DecisionKind,
     DecisionRequest,
     DecisionResult,
     LLMRequest,
@@ -61,7 +67,11 @@ def test_contracts_do_not_share_request_types() -> None:
     assert not issubclass(LLMRequest, DecisionRequest)
     assert not issubclass(DecisionRequest, LLMRequest)
     assert set(LLMRequest.model_fields) == {"model", "prompt"}
-    assert set(DecisionRequest.model_fields) == {"model", "question", "options"}
+    # V0.4 evolved the decision request additively (all new fields are optional).
+    assert set(DecisionRequest.model_fields) == {
+        "model", "question", "options", "kind", "subject", "ordered", "descriptions",
+    }
+    assert DecisionRequest(model="m", question="q?", options=("a", "b")).ordered is False
 
 
 # --- fake adapters ------------------------------------------------------------------
@@ -100,6 +110,59 @@ def test_fake_translates_vendor_error_into_provider_call_error() -> None:
     assert isinstance(error.__cause__, FakeVendorError)  # chained, never leaked raw
     assert isinstance(error, ProviderError)
     assert isinstance(error, HarnessError)  # the CLI treats it as an expected failure
+
+
+# --- V0.4: typed decisions and the evolved fake ---------------------------------------------------
+
+
+def test_v02_style_decision_objects_remain_valid() -> None:
+    request = DecisionRequest(model="m", question="q?", options=("a", "b"))
+    result = DecisionResult(provider="p", model="m", choice="a", confidence=0.5)
+    assert (request.kind, request.ordered, request.subject) == ("classification", False, None)
+    assert (result.score, result.probability, result.probabilities) == (None, None, {})
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        ({"probabilities": {"b": 1.0}}, "choice is missing from probabilities"),
+        ({"probabilities": {"a": 0.5, "b": 0.3}}, "must sum to 1"),
+        ({"score": 1.2}, "less than or equal to 1"),
+        ({"probability": -0.1}, "greater than or equal to 0"),
+        ({"kind": "workflow"}, "kind"),
+        ({"input_tokens": -1}, "input_tokens"),
+    ],
+)
+def test_decision_result_metrics_are_validated(fields: dict[str, object], expected: str) -> None:
+    with pytest.raises(ValidationError, match=expected):
+        DecisionResult.model_validate(
+            {"provider": "p", "model": "m", "choice": "a", "confidence": 0.5, **fields}
+        )
+
+
+def test_decision_request_descriptions_must_name_options() -> None:
+    with pytest.raises(ValidationError, match="unknown options"):
+        DecisionRequest(model="m", question="q?", options=("a", "b"), descriptions={"c": "x"})
+
+
+def test_fake_decision_custom_score_choice_and_kind() -> None:
+    request = DecisionRequest(
+        model="m", question="sev?", options=("low", "mid", "high"),
+        kind=DecisionKind.SEVERITY, ordered=True,
+    )
+    assert FakeDecisionProvider(choice="high").decide(request).score == 1.0  # derived position
+    custom = FakeDecisionProvider(choice="mid", score=0.4, confidence=0.3).decide(request)
+    assert (custom.choice, custom.score, custom.confidence, custom.kind) == (
+        "mid", 0.4, 0.3, DecisionKind.SEVERITY,
+    )
+
+
+def test_fake_simulates_timeout_and_invalid_choice() -> None:
+    request = DecisionRequest(model="m", question="q?", options=("a", "b"))
+    with pytest.raises(DecisionTimeoutError, match="provider 'fake-decision' call failed: slow"):
+        FakeDecisionProvider(fail_with="slow", fail_as=DecisionTimeoutError).decide(request)
+    # The fake can break the contract on purpose; the decision service must catch it.
+    assert FakeDecisionProvider(choice="z").decide(request).choice == "z"
 
 
 def test_failed_call_is_still_recorded() -> None:

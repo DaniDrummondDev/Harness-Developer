@@ -1,6 +1,14 @@
 # Decision escalation order (implemented in V5). Layers are provider-agnostic:
 # deterministic -> probabilistic (e.g. Jev) -> reasoning (LLM) -> human.
 # Invariants: starts with deterministic, no repeats, human (if present) is last.
+#
+# V0.4 (Decision Foundation) implements only the probabilistic layer:
+#   model       logical alias in models.yaml used for probabilistic decisions;
+#               its provider must be enabled in providers.yaml to decide anything.
+#   thresholds  declarative, validated 0..1. `minimum_confidence`: below it a
+#               decision is returned as FALLBACK_REQUIRED (low_confidence). The
+#               Harness only signals the fallback; it never runs one in V0.4.
+#               Starting value, not calibrated: tune it on your own data (V5.2).
 version: 1
 decisions:
   escalation_order:
@@ -8,3 +16,6 @@ decisions:
     - probabilistic
     - reasoning
     - human
+  model: decision
+  thresholds:
+    minimum_confidence: 0.70

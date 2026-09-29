@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ai-engineering-harness"
 dynamic = ["version"]
-description = "AI Engineering Harness — engineering control plane (V0.2: provider abstraction)."
+description = "AI Engineering Harness — engineering control plane (V0.4: decision foundation)."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -36,6 +36,10 @@ packages = ["orchestrator"]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
 filterwarnings = ["error"]
+markers = [
+    "mem0: needs a running self-hosted Mem0 server (opt-in: HARNESS_MEM0_INTEGRATION=1)",
+    "jev: calls the real TypeSafe Jev API (opt-in: HARNESS_JEV_INTEGRATION=1)",
+]
 
 [tool.ruff]
 line-length = 100

@@ -17,13 +17,24 @@ from bugs (traceback).
     ├── RequestError
     │   ├── InvalidRequestError       raw input cannot be normalized into an EngineeringRequest
     │   └── ModeNotEnabledError       the request's mode is disabled in modes.yaml
-    └── ProviderError
-        ├── ProviderRegistrationError adapter rejected by the registry (duplicate id, wrong type)
-        ├── ProviderNotFoundError     provider id not declared / no adapter registered for it
-        ├── ProviderNotEnabledError   provider declared but `enabled: false` in providers.yaml
-        ├── ProviderTypeMismatchError provider registered under the other contract (LLM/decision)
-        ├── ModelNotFoundError        model alias not declared in models.yaml
-        └── ProviderCallError         an adapter call failed (vendor errors are translated here)
+    ├── ProviderError
+    │   ├── ProviderRegistrationError adapter rejected by the registry (duplicate id, wrong type)
+    │   ├── ProviderNotFoundError     provider id not declared / no adapter registered for it
+    │   ├── ProviderNotEnabledError   provider declared but `enabled: false` in providers.yaml
+    │   ├── ProviderTypeMismatchError provider registered under the other contract (LLM/decision)
+    │   ├── ModelNotFoundError        model alias not declared in models.yaml
+    │   ├── InvalidDecisionRequestError decision input violates DecisionRequest (no call made)
+    │   └── ProviderCallError        an adapter call failed (vendor errors are translated here)
+    │       ├── DecisionAuthenticationError  key missing/rejected (V0.4; raised, no fallback)
+    │       ├── DecisionInvalidResponseError malformed/out-of-contract answer (V0.4; fallback)
+    │       └── DecisionUnavailableError     unreachable, overloaded, 5xx (V0.4; fallback)
+    │           └── DecisionTimeoutError     no answer within the timeout (V0.4; fallback)
+    └── MemoryStoreError              memory backend failure / unexpected backend response (V0.3)
+        ├── InvalidMemoryInputError   malformed scope, source, content or query (no backend call)
+        ├── UnsafeMemoryContentError  safe ingestion policy blocked the content (nothing stored)
+        ├── MemoryNotFoundError       no stored memory has this id (includes malformed ids)
+        ├── MemoryConfigurationError  memory disabled/misconfigured or credentials rejected
+        └── MemoryUnavailableError    backend unreachable, timed out or failing (5xx)
 
 Names intentionally avoid shadowing builtins (`EnvironmentError`) and
 Pydantic (`ValidationError`).
@@ -126,9 +137,65 @@ class ModelNotFoundError(ProviderError):
     """The logical model alias is not declared in models.yaml."""
 
 
+class InvalidDecisionRequestError(ProviderError):
+    """Decision input (question, options, descriptions) violates the DecisionRequest
+    contract; rejected before any provider is called (V0.4)."""
+
+
 class ProviderCallError(ProviderError):
     """An adapter call failed. Messages must not contain prompts, outputs or secrets."""
 
     def __init__(self, provider_id: str, message: str) -> None:
         self.provider_id = provider_id
         super().__init__(f"provider '{provider_id}' call failed: {message}")
+
+
+class DecisionAuthenticationError(ProviderCallError):
+    """Decision provider credentials are missing or were rejected (401/403).
+    A configuration problem: never turned into a fallback."""
+
+
+class DecisionInvalidResponseError(ProviderCallError):
+    """The decision provider answered, but outside the contract (malformed body,
+    choice not in options, probability out of range...)."""
+
+
+class DecisionUnavailableError(ProviderCallError):
+    """The decision provider is unreachable, rate limited, overloaded or failing (5xx)."""
+
+
+class DecisionTimeoutError(DecisionUnavailableError):
+    """The decision provider did not answer within the configured timeout."""
+
+
+class MemoryStoreError(HarnessError):
+    """Base class for long-term memory failures (V0.3). Named to avoid the
+    `MemoryError` builtin. Backend (Mem0, HTTP) exceptions never cross the
+    adapter boundary; messages never contain memory content or credentials."""
+
+
+class InvalidMemoryInputError(MemoryStoreError):
+    """Input violates the memory contract (scope, source, content, query)."""
+
+
+class UnsafeMemoryContentError(MemoryStoreError):
+    """The safe ingestion policy blocked the content; nothing was persisted."""
+
+    def __init__(self, rules: tuple[str, ...]) -> None:
+        self.rules = rules
+        super().__init__(
+            "content blocked by the safe ingestion policy "
+            f"(matched rules: {', '.join(rules)}); nothing was stored"
+        )
+
+
+class MemoryNotFoundError(MemoryStoreError):
+    """No stored memory has the given id."""
+
+
+class MemoryConfigurationError(MemoryStoreError):
+    """Memory is disabled or misconfigured, or the backend rejected the credentials."""
+
+
+class MemoryUnavailableError(MemoryStoreError):
+    """The memory backend is unreachable, timed out or failed internally."""

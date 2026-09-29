@@ -1,10 +1,17 @@
 # Logical model aliases -> provider + the provider's own model identifier (`model_id`).
 # Code refers only to the alias; switching provider/model is an edit here (V0.2).
-# Each `provider` must exist in providers.yaml. Empty until a vendor adapter exists.
+# Each `provider` must exist in providers.yaml.
 version: 1
-models: {}
-# Example:
-# models:
+models:
+  # Probabilistic decisions (V0.4), referenced by decisions.yaml `model`.
+  # `jev-latest` is TypeSafe's moving alias; each result records the exact version
+  # that answered (`resolved_model`). Pin a versioned id (e.g. jev-1.13.0) once
+  # confidence thresholds are tuned against it.
+  decision:
+    provider: jev
+    model_id: jev-latest
+    description: Structured probabilistic decisions (classification, routing, severity...).
+# Example (V2.x):
 #   reasoning:
 #     provider: openai
 #     model_id: <model-id>

@@ -1,7 +1,16 @@
-# Long-term memory (Mem0 self-hosted, V0.3). Declared only; nothing connects in V0.
-# If enabled is true, backend is required.
+# Long-term operational memory (V0.3): Mem0 self-hosted REST server.
+# Memory is auxiliary context, NEVER a source of truth: docs, ADRs, policies,
+# task/sprint contracts and Git always win.
+#
+# enabled: true requires `backend`; backend "mem0" requires the `mem0` section.
+# The API key is read from the environment variable named in `api_key_env`;
+# never put the key itself in this file. Setup: engineering/README.md ("Memory").
 version: 1
 memory:
   enabled: false
-  backend: null
+  backend: mem0
   description: Operational long-term memory. Never a source of truth.
+  mem0:
+    base_url: http://localhost:8888
+    api_key_env: MEM0_API_KEY
+    timeout_seconds: 30

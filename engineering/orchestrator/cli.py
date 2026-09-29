@@ -8,18 +8,29 @@ Output conventions:
 - `doctor`: exit 0 when no check FAILs, 1 otherwise (it never raises);
 - `intake`: admitted request as JSON on stdout, exit 0; a rejected request or
   invalid configuration -> `error: ...` on stderr, exit 1;
+- `memory ...`: result as JSON on stdout, exit 0; any Harness error (disabled
+  memory, missing key, unsafe content, unknown id, backend down) -> `error: ...`
+  on stderr, exit 1; `memory health` exits 1 unless the backend is healthy;
+- `decision ...` (V0.4): DecisionOutcome as JSON on stdout; exit 0 when DECIDED,
+  3 when FALLBACK_REQUIRED (low confidence, provider unavailable/timeout, invalid
+  response), 1 on a Harness error (not configured, disabled, missing/rejected key);
+  `decision health` exits 1 unless the provider is healthy. Decision telemetry is
+  logged as JSON at INFO (`--log-level INFO`), on stderr;
 - usage errors (unknown command/option, bad --log-level) -> Typer/Click, exit 2.
 
-Commands: root (identity + help), `doctor` (V0) and `intake` (V0.1). New
+Commands: root (identity + help), `doctor` (V0), `intake` (V0.1), the
+`memory` group (V0.3: health, add, search, update, delete) and the `decision`
+group (V0.4: classify, route, severity, relevance, health). New
 commands are added as `@app.command()` functions here, delegating logic to
 their own module.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import typer
 from rich.console import Console
@@ -30,8 +41,11 @@ from orchestrator.config import HARNESS_ROOT_ENV, load_config, resolve_harness_r
 from orchestrator.core.admission import admit
 from orchestrator.core.exceptions import HarnessError
 from orchestrator.core.request import Intent, RequestSource
+from orchestrator.decisions.service import open_decisions
 from orchestrator.doctor import CheckStatus, DoctorReport, run_doctor
 from orchestrator.intake import normalize_request
+from orchestrator.memory.service import MemoryService, open_memory
+from orchestrator.providers.base import DecisionKind
 from orchestrator.utils.logging import LEVELS, configure_logging
 
 console = Console()
@@ -84,7 +98,7 @@ def root_command(
         ),
     ] = False,
 ) -> None:
-    """AI Engineering Harness — engineering control plane (V0.2 provider abstraction)."""
+    """AI Engineering Harness — engineering control plane (V0.4 decision foundation)."""
     try:
         configure_logging(log_level)
     except ValueError as exc:
@@ -159,6 +173,237 @@ def intake(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(admitted.model_dump_json(indent=2))
+
+
+# --- memory (V0.3) -------------------------------------------------------------------
+
+memory_app = typer.Typer(
+    help="Long-term operational memory (Mem0 self-hosted). Explicit operations only; "
+    "memory is auxiliary context, never a source of truth.",
+    no_args_is_help=True,
+    rich_markup_mode=None,
+)
+app.add_typer(memory_app, name="memory")
+
+_SCOPE_HELP = "project | task:<id> | run:<id> | agent:<id> | release:<id>"
+
+
+def _memory_service(ctx: typer.Context) -> MemoryService:
+    state: CliState = ctx.find_root().obj
+    return open_memory(load_config(resolve_harness_root(state.root)))
+
+
+def _fail(exc: HarnessError) -> NoReturn:
+    typer.echo(f"error: {exc}", err=True)
+    raise typer.Exit(code=1) from exc
+
+
+def _echo_json(data: object) -> None:
+    typer.echo(json.dumps(data, indent=2, default=str))
+
+
+@memory_app.command("health")
+def memory_health(ctx: typer.Context) -> None:
+    """Check connectivity and credentials of the memory backend. Exit 0 only when healthy."""
+    try:
+        health = _memory_service(ctx).health()
+    except HarnessError as exc:
+        _fail(exc)
+    _echo_json(health.model_dump(mode="json"))
+    raise typer.Exit(code=0 if health.ok else 1)
+
+
+@memory_app.command("add")
+def memory_add(
+    ctx: typer.Context,
+    content: Annotated[str, typer.Argument(help="Text to remember (checked for secrets first).")],
+    scope: Annotated[str, typer.Option("--scope", help=_SCOPE_HELP)],
+    source: Annotated[
+        str, typer.Option("--source", help="Lineage <type>:<id>, e.g. task_result:T-12.")
+    ],
+) -> None:
+    """Store one memory in a scope, with its origin (lineage)."""
+    try:
+        service = _memory_service(ctx)
+        record = service.add(content, scope=service.scope(scope), source=service.source(source))
+    except HarnessError as exc:
+        _fail(exc)
+    _echo_json(record.model_dump(mode="json"))
+
+
+@memory_app.command("search")
+def memory_search(
+    ctx: typer.Context,
+    query: Annotated[str, typer.Argument(help="What to look for.")],
+    scope: Annotated[str, typer.Option("--scope", help=_SCOPE_HELP)],
+    limit: Annotated[int, typer.Option("--limit", help="Maximum results (1-50).")] = 5,
+) -> None:
+    """Search memories of exactly one scope (most relevant first)."""
+    try:
+        service = _memory_service(ctx)
+        hits = service.search(query, scope=service.scope(scope), limit=limit)
+    except HarnessError as exc:
+        _fail(exc)
+    _echo_json([hit.model_dump(mode="json") for hit in hits])
+
+
+@memory_app.command("update")
+def memory_update(
+    ctx: typer.Context,
+    memory_id: Annotated[str, typer.Argument(help="Id returned by add/search.")],
+    content: Annotated[str, typer.Argument(help="New text (checked for secrets first).")],
+) -> None:
+    """Replace the text of a memory; scope and lineage are kept."""
+    try:
+        record = _memory_service(ctx).update(memory_id, content)
+    except HarnessError as exc:
+        _fail(exc)
+    _echo_json(record.model_dump(mode="json"))
+
+
+@memory_app.command("delete")
+def memory_delete(
+    ctx: typer.Context,
+    memory_id: Annotated[str, typer.Argument(help="Id returned by add/search.")],
+) -> None:
+    """Delete one memory."""
+    try:
+        _memory_service(ctx).delete(memory_id)
+    except HarnessError as exc:
+        _fail(exc)
+    _echo_json({"deleted": memory_id})
+
+
+# --- decision (V0.4) -----------------------------------------------------------------
+
+decision_app = typer.Typer(
+    help="Probabilistic decisions (Jev). Each command returns a DecisionOutcome as JSON; "
+    "a fallback is only signalled, never executed. Jev is probabilistic, never a rule.",
+    no_args_is_help=True,
+    rich_markup_mode=None,
+)
+app.add_typer(decision_app, name="decision")
+
+# Exit code when the decision layer answered but requires a fallback (see module doc).
+EXIT_FALLBACK_REQUIRED = 3
+
+
+@dataclass(frozen=True, slots=True)
+class _DecisionPreset:
+    """CLI defaults only (not Harness domain): every value can be overridden."""
+
+    kind: DecisionKind
+    question: str
+    options: tuple[str, ...]
+    ordered: bool = False
+
+
+_PRESETS = {
+    "classify": _DecisionPreset(
+        DecisionKind.CLASSIFICATION,
+        "What kind of engineering work does this request describe?",
+        ("bug", "feature", "refactor"),
+    ),
+    "route": _DecisionPreset(
+        DecisionKind.ROUTING,
+        "Which engineering role should handle this request first?",
+        ("architect", "implementer", "reviewer"),
+    ),
+    "severity": _DecisionPreset(
+        DecisionKind.SEVERITY,
+        "How severe is this issue for the software project?",
+        ("low", "medium", "high", "critical"),
+        ordered=True,
+    ),
+    "relevance": _DecisionPreset(
+        DecisionKind.CONTEXT_RELEVANCE,
+        "How relevant is this item as context for the task?",
+        ("required", "high_value", "optional", "excluded"),
+    ),
+}
+
+_SubjectArg = Annotated[str, typer.Argument(help="The text being judged.")]
+_OptionOpt = Annotated[
+    list[str] | None,
+    typer.Option("--option", "-o", help="An allowed answer (repeat). Default: preset options."),
+]
+_QuestionOpt = Annotated[
+    str | None, typer.Option("--question", "-q", help="Override the preset question.")
+]
+
+
+def _decide(
+    ctx: typer.Context, preset: _DecisionPreset, subject: str,
+    options: list[str] | None, question: str | None,
+) -> None:
+    state: CliState = ctx.find_root().obj
+    try:
+        service = open_decisions(load_config(resolve_harness_root(state.root)))
+        outcome = service.decide(
+            question=question or preset.question,
+            options=tuple(options) if options else preset.options,
+            kind=preset.kind,
+            subject=subject,
+            ordered=preset.ordered,
+        )
+    except HarnessError as exc:
+        _fail(exc)
+    _echo_json(outcome.model_dump(mode="json"))
+    raise typer.Exit(code=EXIT_FALLBACK_REQUIRED if outcome.fallback_required else 0)
+
+
+@decision_app.command("classify")
+def decision_classify(
+    ctx: typer.Context, subject: _SubjectArg, option: _OptionOpt = None,
+    question: _QuestionOpt = None,
+) -> None:
+    """Classify a request (default options: bug, feature, refactor)."""
+    _decide(ctx, _PRESETS["classify"], subject, option, question)
+
+
+@decision_app.command("route")
+def decision_route(
+    ctx: typer.Context, subject: _SubjectArg, option: _OptionOpt = None,
+    question: _QuestionOpt = None,
+) -> None:
+    """Pick the role that should handle a request (default: architect, implementer, reviewer)."""
+    _decide(ctx, _PRESETS["route"], subject, option, question)
+
+
+@decision_app.command("severity")
+def decision_severity(
+    ctx: typer.Context, subject: _SubjectArg, option: _OptionOpt = None,
+    question: _QuestionOpt = None,
+) -> None:
+    """Rate severity on an ordered scale, lowest first (default: low..critical). Reports score."""
+    _decide(ctx, _PRESETS["severity"], subject, option, question)
+
+
+@decision_app.command("relevance")
+def decision_relevance(
+    ctx: typer.Context,
+    subject: Annotated[str, typer.Argument(help="The candidate context item.")],
+    task: Annotated[str, typer.Option("--task", help="The task the context is for.")],
+    option: _OptionOpt = None,
+    question: _QuestionOpt = None,
+) -> None:
+    """Judge how relevant a context item is for a task (no Context Engine: one item, one call)."""
+    preset = _PRESETS["relevance"]
+    base = question or preset.question
+    _decide(ctx, preset, subject, option, f"{base}\nTask: {task}")
+
+
+@decision_app.command("health")
+def decision_health(ctx: typer.Context) -> None:
+    """Check decision provider connectivity and credentials (no inference).
+    Exit 0 only when healthy."""
+    state: CliState = ctx.find_root().obj
+    try:
+        health = open_decisions(load_config(resolve_harness_root(state.root))).health()
+    except HarnessError as exc:
+        _fail(exc)
+    _echo_json(health.model_dump(mode="json"))
+    raise typer.Exit(code=0 if health.ok else 1)
 
 
 def main() -> None:

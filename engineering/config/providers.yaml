@@ -1,7 +1,9 @@
 # Provider ids (keys) -> adapter kind. Consumed by ModelResolver (V0.2): a model whose
-# provider is `enabled: false` cannot be resolved (fail closed). No vendor adapter exists
-# yet (OpenAI/Anthropic/NVIDIA: V2.x, Jev: V0.4), so every provider stays disabled.
-# Never put API keys in this file.
+# provider is `enabled: false` cannot be resolved (fail closed).
+# Adapters: jev (V0.4). OpenAI/Anthropic/NVIDIA adapters arrive in V2.x.
+#
+# Optional connection fields (vendor-neutral): base_url, api_key_env, timeout_seconds.
+# Never put API keys in this file: `api_key_env` only NAMES the environment variable.
 version: 1
 providers:
   openai:
@@ -18,5 +20,9 @@ providers:
     description: Additional inference capacity.
   jev:
     kind: jev
+    # Opt-in: set to true and export JEV_API_KEY to make real decisions.
     enabled: false
-    description: Structured probabilistic decisions.
+    description: Structured probabilistic decisions (TypeSafe System One).
+    base_url: https://api.typesafe.ai
+    api_key_env: JEV_API_KEY
+    timeout_seconds: 15

@@ -7,10 +7,12 @@ automatically; tests (or a future offline mode) register them explicitly.
 
 Behaviour:
 - `FakeLLMProvider.complete` returns `"[<provider>/<model>] <prompt>"`;
-- `FakeDecisionProvider.decide` picks `request.options[0]` with a fixed confidence;
+- `FakeDecisionProvider.decide` picks `request.options[0]` (or a fixed `choice`)
+  with a fixed confidence/score;
 - `fail_with="<reason>"` makes every call fail the way a real adapter must:
   a vendor-level exception is caught at the adapter boundary and re-raised
-  as `ProviderCallError` (the pattern concrete adapters must follow);
+  as `ProviderCallError` or the subclass given in `fail_as` (the pattern
+  concrete adapters must follow);
 - every received request is recorded in `.requests` for assertions.
 """
 
@@ -30,9 +32,16 @@ class FakeVendorError(Exception):
 
 
 class _FakeAdapter:
-    def __init__(self, provider_id: str, *, fail_with: str | None = None) -> None:
+    def __init__(
+        self,
+        provider_id: str,
+        *,
+        fail_with: str | None = None,
+        fail_as: type[ProviderCallError] = ProviderCallError,
+    ) -> None:
         self._provider_id = provider_id
         self._fail_with = fail_with
+        self._fail_as = fail_as
 
     @property
     def provider_id(self) -> str:
@@ -47,7 +56,7 @@ class _FakeAdapter:
         try:
             self._vendor_call()
         except FakeVendorError as exc:
-            raise ProviderCallError(self._provider_id, str(exc)) from exc
+            raise self._fail_as(self._provider_id, str(exc)) from exc
 
 
 class FakeLLMProvider(_FakeAdapter):
@@ -66,23 +75,45 @@ class FakeLLMProvider(_FakeAdapter):
 
 
 class FakeDecisionProvider(_FakeAdapter):
+    """Deterministic decision adapter.
+
+    - `choice`: fixed answer (default: `request.options[0]`). Passing a value that
+      is not an option simulates a provider breaking the contract, which the
+      decision service must reject (V0.4 boundary validation);
+    - `confidence` / `score`: fixed metrics. For an ordered request without an
+      explicit `score`, the fake reports the choice's position (index / (n - 1));
+    - `fail_as`: the `ProviderCallError` subclass raised with `fail_with`, e.g.
+      `DecisionTimeoutError` to simulate a timeout.
+    """
+
     def __init__(
         self,
         provider_id: str = "fake-decision",
         *,
         confidence: float = 1.0,
+        choice: str | None = None,
+        score: float | None = None,
         fail_with: str | None = None,
+        fail_as: type[ProviderCallError] = ProviderCallError,
     ) -> None:
-        super().__init__(provider_id, fail_with=fail_with)
+        super().__init__(provider_id, fail_with=fail_with, fail_as=fail_as)
         self._confidence = confidence
+        self._choice = choice
+        self._score = score
         self.requests: list[DecisionRequest] = []
 
     def decide(self, request: DecisionRequest) -> DecisionResult:
         self.requests.append(request)
         self._call()
+        choice = self._choice if self._choice is not None else request.options[0]
+        score = self._score
+        if score is None and request.ordered and choice in request.options:
+            score = request.options.index(choice) / (len(request.options) - 1)
         return DecisionResult(
             provider=self.provider_id,
             model=request.model,
-            choice=request.options[0],
+            choice=choice,
             confidence=self._confidence,
+            kind=request.kind,
+            score=score,
         )

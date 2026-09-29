@@ -1,4 +1,4 @@
-# Architecture — as built (V0.2)
+# Architecture — as built (V0.4)
 
 Target architecture: [`../../docs/03-ARCHITECTURE-AND-FOLDER-STRUCTURE.md`](../../docs/03-ARCHITECTURE-AND-FOLDER-STRUCTURE.md).
 This file records **what exists now** and the decisions taken to get here. Modules from
@@ -9,17 +9,26 @@ the target tree are created only when a version needs them.
 | Module | Responsibility | Depends on |
 |---|---|---|
 | `orchestrator/__main__.py` | `python -m orchestrator` entry point | `cli` |
-| `orchestrator/cli.py` | Typer app: root command (identity + help), global options (`--root`, `--log-level`, `--version`), `doctor` and `intake` commands, rendering | `doctor`, `config`, `intake`, `core.admission`, `utils.logging` |
-| `orchestrator/doctor.py` | Deterministic checks, aggregation (worst status wins), exit code | `config`, `utils.shell` |
+| `orchestrator/cli.py` | Typer app: root command (identity + help), global options (`--root`, `--log-level`, `--version`), `doctor`, `intake`, **V0.3** `memory` (health/add/search/update/delete) and **V0.4** `decision` (classify/route/severity/relevance/health) commands, rendering | `doctor`, `config`, `intake`, `core.admission`, `memory.service`, `decisions.service`, `utils.logging` |
+| `orchestrator/doctor.py` | Deterministic checks, aggregation (worst status wins), exit code; **V0.3** opt-in `memory` check; **V0.4** opt-in `decisions` check | `config`, `utils.shell`, `memory.service`, `decisions.service` |
 | `orchestrator/config.py` | Harness-root resolution, YAML parsing, Pydantic schemas, cross-file checks, `HarnessConfig` (incl. `enabled_modes`) | `utils.files`, `core.exceptions`, `core.request` |
 | `orchestrator/intake.py` | **V0.1** Normalization: raw strings from any origin → `EngineeringRequest` | `core.request`, `core.exceptions` |
 | `orchestrator/core/request.py` | **V0.1** Domain contracts: `ExecutionMode`, `RequestSource`, `Intent`, `WorkflowState`, `SOURCES_BY_MODE`, `EngineeringRequest`, `AdmittedRequest` | — (Pydantic only) |
 | `orchestrator/core/admission.py` | **V0.1** Core entry point: `admit()` — initial transition rule (→ `PLANNED`) | `core.request`, `core.exceptions` |
-| `orchestrator/core/exceptions.py` | `HarnessError` hierarchy (incl. **V0.2** `ProviderError` subtree) | — |
-| `orchestrator/providers/base.py` | **V0.2** Contracts: `LLMProvider`, `DecisionProvider` (Protocols), `LLMRequest/Result`, `DecisionRequest/Result` | — (Pydantic only) |
+| `orchestrator/core/exceptions.py` | `HarnessError` hierarchy (incl. **V0.2** `ProviderError`, **V0.3** `MemoryStoreError` subtrees; **V0.4** `Decision*Error` under `ProviderCallError`, `InvalidDecisionRequestError`) | — |
+| `orchestrator/providers/base.py` | **V0.2** Contracts: `LLMProvider`, `DecisionProvider` (Protocols), `LLMRequest/Result`, `DecisionRequest/Result`; **V0.4** `DecisionKind`, additive request/result fields (kind, subject, ordered, descriptions / probability, probabilities, score, resolved_model, input_tokens) | — (Pydantic only) |
+| `orchestrator/providers/jev.py` | **V0.4** `JevDecisionProvider` (TypeSafe System One HTTP, stdlib urllib) + `JevHttpTransport`; only module that knows Jev | `providers.base`, `core.exceptions` |
+| `orchestrator/decisions/models.py` | **V0.4** `DecisionOutcome`, `DecisionStatus`, `FallbackReason`, `DecisionTelemetry`, `DecisionHealth` | `providers.base` |
+| `orchestrator/decisions/service.py` | **V0.4** `DecisionService` (request build → provider → boundary validation → threshold → outcome + telemetry), `open_decisions(config)` composition, `build_decision_adapter` | `config`, `providers.*`, `decisions.models`, `core.exceptions` |
 | `orchestrator/providers/registry.py` | **V0.2** `ProviderRegistry`: provider id → adapter, typed per contract | `providers.base`, `core.exceptions` |
 | `orchestrator/providers/resolution.py` | **V0.2** `ModelResolver`: alias → provider → `model_id` → adapter; `ResolvedModel` | `providers.registry`, `config` (types only), `core.exceptions` |
 | `orchestrator/providers/fake.py` | **V0.2** `FakeLLMProvider`, `FakeDecisionProvider` (offline, deterministic, test-only) | `providers.base`, `core.exceptions` |
+| `orchestrator/memory/models.py` | **V0.3** `ScopeKind`, `MemoryScope` (+ `namespace`), `SourceType`, `MemorySource` (lineage), `NewMemory`, `MemoryRecord`, `MemoryQuery`, `MemoryHit`, `MemoryHealth` | — (Pydantic only) |
+| `orchestrator/memory/base.py` | **V0.3** `MemoryProvider` contract (Protocol): health, add, search, update, delete | `memory.models` |
+| `orchestrator/memory/safety.py` | **V0.3** Safe ingestion policy: deterministic ALLOW/BLOCK rules, `ensure_safe` | `core.exceptions` |
+| `orchestrator/memory/service.py` | **V0.3** `MemoryService` (validation → policy → provider) and `open_memory(config)` composition | `config`, `memory.*`, `core.exceptions` |
+| `orchestrator/memory/mem0.py` | **V0.3** `Mem0MemoryProvider` (REST, stdlib urllib) + `HttpTransport`; only module that knows Mem0 | `memory.models`, `core.exceptions` |
+| `orchestrator/memory/fake.py` | **V0.3** `FakeMemoryProvider` (offline, deterministic, test-only) | `memory.models`, `core.exceptions` |
 | `orchestrator/utils/shell.py` | `run_command` → `CommandResult` (no shell, typed errors) | `core.exceptions` |
 | `orchestrator/utils/files.py` | Path resolution and existence/read helpers | `core.exceptions` |
 | `orchestrator/utils/logging.py` | Central logging config (stderr, WARNING default) | — |
@@ -28,7 +37,12 @@ Dependencies point one way: `cli → (doctor | intake) → config → utils → 
 `providers.resolution → (providers.registry → providers.base) + config`. No module imports a
 vendor SDK (guarded by `tests/unit/test_provider_isolation.py`). `core/` knows nothing about
 CLI, YAML, Typer, `config` or `providers`; `providers/` knows nothing about CLI, intake,
-requests or YAML parsing. Nothing in the CLI or `doctor` uses providers yet.
+requests or YAML parsing. Since V0.4 the CLI and `doctor` reach providers only through
+`decisions.service.open_decisions`; only `decisions/service.py` imports `providers/jev.py`
+(guarded by `tests/unit/test_decision_config.py`), and `decisions/` never imports an LLM.
+`memory/` knows nothing about CLI, intake, requests or inference providers; only
+`memory/service.py` imports the Mem0 adapter, and only `cli.py`/`doctor.py` open memory
+(guarded by `tests/unit/test_memory_isolation.py`).
 
 ## Main flows
 
@@ -39,7 +53,8 @@ resolve_harness_root(--root | $HARNESS_ROOT | package dir)   -> HarnessPathError
   └─ for each of the 10 required files:
        parse YAML (safe, duplicate keys rejected)              -> ConfigFileNotFoundError / ConfigParseError
        validate against its versioned, extra="forbid" model   -> ConfigValidationError
-  └─ cross-file references (models→providers, roles→models)  -> ConfigValidationError
+  └─ cross-file references (models→providers, roles→models,
+     decisions.model→models)                                 -> ConfigValidationError
   └─ resolve project.root against harness root; must exist   -> ConfigValidationError
   └─ HarnessConfig (frozen)
 ```
@@ -47,8 +62,11 @@ resolve_harness_root(--root | $HARNESS_ROOT | package dir)   -> HarnessPathError
 **Doctor**
 
 ```text
-python → harness_root → [permissions, config_files, config_valid, structure] → git → [git_repository]
-                         (only if root found)                                       (only if git + config ok)
+python → harness_root → [permissions, config_files, config_valid, structure, memory*, decisions**] → git → [git_repository]
+                         (only if root found)                                                             (only if git + config ok)
+* memory: only when memory.yaml has enabled: true — healthy PASS, unavailable WARN, misconfigured FAIL
+** decisions: only when the decisions.model's provider is enabled — GET /v1/models (no inference):
+   healthy PASS, unavailable WARN, missing/rejected key FAIL
 aggregate: worst of PASS < WARN < FAIL; exit 1 iff FAIL; empty report = FAIL; crashed check = FAIL
 ```
 
@@ -92,8 +110,63 @@ providers.yaml + models.yaml ──load_config()──> HarnessConfig.providers 
   adapter/vendor failure ─────────────────── ProviderCallError (vendor exception chained)
 ```
 
-Adapters are registered by the caller (today: tests, with the fakes). No factory builds
-adapters from `kind` yet: there is no concrete adapter to build.
+Adapters are registered by the caller. Since V0.4 the one composition step that builds a
+concrete adapter from `kind` is `decisions.service.build_decision_adapter` (`kind: jev`);
+tests register fakes directly.
+
+**Memory (V0.3)**
+
+```text
+harness memory add|search|update|delete|health  (explicit operator commands only)
+        │
+open_memory(config) ── memory disabled / $MEM0_API_KEY unset ──> MemoryConfigurationError
+        │  memory.yaml (base_url, api_key_env, timeout) + environment
+        ↓
+MemoryService(provider, project)
+  1. parse/validate: scope `<kind>[:<key>]`, source `<type>:<id>`, content ≤ 8000 chars
+                                                      ──> InvalidMemoryInputError
+  2. safe ingestion (add/update): ensure_safe(content, source.id)
+                                                      ──> UnsafeMemoryContentError (nothing sent)
+  3. MemoryProvider
+        ↓
+Mem0MemoryProvider ── HTTP (X-API-Key) ──> Mem0 self-hosted REST ──> pgvector
+  scope   → Mem0 user_id = "<project>/<kind>[/<key>]"   (exact-match isolation)
+  lineage → metadata harness_{schema,project,scope,scope_key,source_type,source_id}
+  infer: false (stored verbatim)
+  401/403 → MemoryConfigurationError · 404(id) → MemoryNotFoundError
+  5xx/connection/timeout → MemoryUnavailableError · other → MemoryStoreError
+```
+
+Memory never overrides official docs, ADRs, policies, task/sprint contracts or Git; nothing
+in the Harness reads memory to make a decision yet (Context Engineering, V1.x).
+
+**Decision (V0.4)**
+
+```text
+harness decision classify|route|severity|relevance  (or any caller of DecisionService)
+        │
+open_decisions(config) ── decisions.model unset ─────────────> ProviderNotEnabledError
+        │  ModelResolver.resolve(alias) ── jev disabled ──────> ProviderNotEnabledError
+        │  build_decision_adapter(kind) ── $JEV_API_KEY ─> DecisionAuthenticationError
+        │  ProviderRegistry.register_decision → resolver.decision(alias)
+        ↓
+DecisionService.decide(question, options, kind, subject, ordered, descriptions)
+  1. DecisionRequest(model=model_id, ...)          ── invalid ──> InvalidDecisionRequestError
+  2. JevDecisionProvider.decide ── POST /v1/systemone (Bearer) ──> api.typesafe.ai
+       unordered → Choice question · ordered → Score question (score/(n-1) → 0..1)
+       401/403 → DecisionAuthenticationError ─────────────────────> raised (+ telemetry "error")
+       422/other → ProviderCallError ─────────────────────────────> raised (+ telemetry "error")
+       timeout → DecisionTimeoutError ────────────┐
+       429/529/5xx/unreachable → DecisionUnavailableError ┤──> FALLBACK_REQUIRED(timeout|unavailable)
+       malformed / choice ∉ options → DecisionInvalidResponseError ┘──> FALLBACK_REQUIRED(invalid_response)
+  3. boundary validation (every adapter): choice ∈ options, identity echoed,
+     probabilities cover the options, score only if ordered ──> FALLBACK_REQUIRED(invalid_response)
+  4. confidence < thresholds.minimum_confidence ────────────────> FALLBACK_REQUIRED(low_confidence) + result
+  5. else DECIDED
+  └─ DecisionTelemetry → JSON log line (orchestrator.decisions.telemetry, INFO) + on the outcome
+```
+
+The fallback is a value, never an action: nothing calls an LLM or a human in V0.4.
 
 ## Decisions (V0)
 
@@ -150,6 +223,54 @@ Rationale and alternatives: [`sprints/sprint-v0.2.md`](sprints/sprint-v0.2.md).
 7. **Errors translated at the adapter boundary** into `ProviderCallError`; messages carry
    the provider id, never prompts, outputs or secrets.
 
+## Decisions (V0.3)
+
+Rationale and alternatives: [`sprints/sprint-v0.3.md`](sprints/sprint-v0.3.md).
+
+1. **`MemoryProvider` is its own contract** in `memory/`, not a provider in `providers/`:
+   memory stores context; it neither infers nor decides.
+2. **Mem0 via its self-hosted REST server**, called with stdlib `urllib` (no new
+   dependency, no SDK). The `mem0ai` `MemoryClient` targets the hosted platform API, and
+   embedding the library in-process would pull its LLM/embedder stack into the Harness.
+3. **Safety and project binding live in `MemoryService`**, enforced once for every
+   backend; adapters are pure translation layers.
+4. **BLOCK or ALLOW, never REDACT.** A masked secret has no value in memory.
+5. **Lineage is mandatory** (`<source_type>:<id>`, types from RF-017). Untraceable memory
+   is not stored.
+6. **Strict scope isolation**: one Mem0 `user_id` namespace per exact scope; search never
+   crosses scopes, and the adapter re-checks the scope of every result.
+7. **`infer: false`**: Harness memories are stored verbatim; no LLM rewrites them.
+8. **Memory disabled by default**; `doctor` checks it only when enabled (unavailable = WARN).
+9. **No automatic ingestion**: only explicit `harness memory` commands write.
+
+## Decisions (V0.4)
+
+Rationale and alternatives: [`sprints/sprint-v0.4.md`](sprints/sprint-v0.4.md).
+
+1. **Evolve `DecisionProvider`, don't duplicate it.** New request/result fields are
+   optional, so V0.2 call sites and fakes stay valid; no second decision contract.
+2. **Jev over its documented HTTP API with stdlib urllib**, not the `typesafe-sdk`: one
+   endpoint needed, zero new dependencies, and an injectable transport for offline tests
+   (same choice as Mem0 in V0.3).
+3. **Unordered options → Jev Choice; ordered options → Jev Score.** `score` exists only
+   where Jev computes one (probability-weighted position), normalized by `n − 1` to 0..1.
+   A Score answer has no `choice`: the Harness takes the most probable level (lower level
+   wins ties).
+4. **Three distinct metrics.** `confidence` = Jev's distribution concentration;
+   `probability` = mass on the choice; `score` = ordinal position. None is derived from
+   another by the Harness.
+5. **`choice ∈ options` enforced twice**: in the adapter and, for every adapter, in
+   `DecisionService`. A violation is never accepted.
+6. **Fallback is a typed outcome, not an action.** Unavailable/timeout/invalid/low
+   confidence → `FALLBACK_REQUIRED` + reason. Auth failures and rejected requests are
+   raised: configuration bugs must not be silently routed to another layer.
+7. **One threshold** (`minimum_confidence`); graded thresholds (auto/review/human) are
+   V5.2. The default 0.70 is a starting value, not a calibration.
+8. **Telemetry = typed record + one JSON log line**; it never contains the question,
+   subject, descriptions or credentials.
+9. **No retries in the adapter.** One call, one outcome; retry policy belongs to V5.
+10. **Jev disabled by default**; `doctor` checks it only when enabled, without inference.
+
 ## Where to change things
 
 - New CLI command → `cli.py` (`@app.command()`), logic in its own module.
@@ -169,3 +290,19 @@ Rationale and alternatives: [`sprints/sprint-v0.2.md`](sprints/sprint-v0.2.md).
   a new small contract in `providers/base.py`, only when a consumer needs it; update
   the contract suites.
 - Switch provider/model for an alias → `config/models.yaml` only.
+- New memory backend → module in `memory/` implementing `MemoryProvider`, a
+  `Test<Backend>(MemoryProviderContract)` subclass, a `backend` literal + section in
+  `config.py`, and a branch in `open_memory`. `MemoryService` and callers do not change.
+- New safe-ingestion rule → `RULES` in `memory/safety.py` + positive/negative examples in
+  `tests/unit/test_memory_safety.py`.
+- New scope or lineage type → `ScopeKind` / `SourceType` in `memory/models.py` (additive);
+  renaming a value breaks stored metadata.
+- Mem0 API change → `memory/mem0.py` and `tests/mem0_emulator.py` only.
+- Jev API change → `providers/jev.py` and `tests/jev_emulator.py` only.
+- New decision adapter → module in `providers/` implementing `DecisionProvider`, a
+  `Test<Adapter>(DecisionProviderContract)` subclass, and a `kind` branch in
+  `decisions.service.build_decision_adapter`. `DecisionService` and callers do not change.
+- Decision threshold values → `config/decisions.yaml`; a new threshold field →
+  `DecisionThresholds` in `config.py` + its consumer (V5.2 policy engine).
+- New decision kind → `DecisionKind` in `providers/base.py` (additive) + CLI preset if needed.
+- Pin the Jev version → `config/models.yaml` `model_id` (e.g. `jev-1.13.0`).

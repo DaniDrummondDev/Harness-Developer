@@ -31,6 +31,11 @@ PROVIDERS_YAML = """
       dormant: {kind: fake, enabled: false}
 """
 
+NO_DECISION_MODEL_YAML = """
+    version: 1
+    decisions: {escalation_order: [deterministic, probabilistic, reasoning, human]}
+"""
+
 
 @pytest.fixture
 def registry() -> ProviderRegistry:
@@ -52,6 +57,8 @@ def config(harness_root: Path, write_config: WriteConfig) -> HarnessConfig:
           sleeping: {provider: dormant, model_id: z}
           unregistered: {provider: beta, model_id: b}
     """)
+    # These aliases replace the shipped ones, so the decision layer is left unconfigured.
+    write_config("decisions.yaml", NO_DECISION_MODEL_YAML)
     return load_config(harness_root)
 
 
@@ -101,6 +108,7 @@ def test_switching_provider_and_model_needs_only_configuration(
     harness_root: Path, write_config: WriteConfig, registry: ProviderRegistry
 ) -> None:
     write_config("providers.yaml", PROVIDERS_YAML)
+    write_config("decisions.yaml", NO_DECISION_MODEL_YAML)
     results = []
     for provider, model_id in [("alpha", "model-1"), ("beta", "model-2")]:
         write_config("models.yaml", f"""
@@ -164,12 +172,16 @@ def test_undeclared_provider_is_rejected_by_resolver(registry: ProviderRegistry)
 
 
 def test_shipped_configuration_needs_no_adapter(harness_root: Path) -> None:
-    """Shipped config: all providers disabled, no models -> nothing resolvable, nothing called."""
+    """Shipped config: all providers disabled -> nothing resolvable, nothing called.
+    Since V0.4 the `decision` alias is declared (-> jev), but jev ships disabled."""
     config = load_config(harness_root)
     resolver = resolver_for(config, ProviderRegistry())
-    assert config.models == {}
-    with pytest.raises(ModelNotFoundError, match="declared: none"):
+    assert set(config.models) == {"decision"}
+    assert not any(provider.enabled for provider in config.providers.values())
+    with pytest.raises(ModelNotFoundError, match="declared: decision"):
         resolver.resolve("anything")
+    with pytest.raises(ProviderNotEnabledError, match="provider 'jev', which is disabled"):
+        resolver.resolve("decision")
 
 
 # --- providers.yaml / models.yaml validation -------------------------------------------

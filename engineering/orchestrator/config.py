@@ -78,10 +78,22 @@ class ProjectFile(_VersionedFile):
 # --- providers.yaml / models.yaml / agents.yaml -----------------------------
 
 
+EnvVarName = Annotated[str, StringConstraints(pattern=r"^[A-Z_][A-Z0-9_]*$")]
+HttpBaseUrl = Annotated[str, StringConstraints(pattern=r"^https?://[^\s/]+(/[^\s]*)?$")]
+Probability = Annotated[float, Field(ge=0.0, le=1.0)]
+
+
 class ProviderEntry(_StrictModel):
+    """A provider id. Connection fields are optional and vendor-neutral (V0.4); an
+    adapter falls back to its documented defaults when they are absent. The API key
+    is never stored here: `api_key_env` names the environment variable holding it."""
+
     kind: Identifier
     enabled: bool = False
     description: str = ""
+    base_url: HttpBaseUrl | None = None
+    api_key_env: EnvVarName | None = None
+    timeout_seconds: float | None = Field(default=None, gt=0, le=120)
 
 
 class ProvidersFile(_VersionedFile):
@@ -132,13 +144,26 @@ class ContextFile(_VersionedFile):
     context: FeatureSection
 
 
+class Mem0Section(_StrictModel):
+    """Connection to a self-hosted Mem0 REST server (V0.3). The API key is never
+    stored here: `api_key_env` names the environment variable that holds it."""
+
+    base_url: HttpBaseUrl
+    api_key_env: EnvVarName = "MEM0_API_KEY"
+    timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+
+
 class MemorySection(FeatureSection):
-    backend: Identifier | None = None
+    # Consumed by orchestrator.memory.service.open_memory (V0.3). Only "mem0" exists.
+    backend: Literal["mem0"] | None = None
+    mem0: Mem0Section | None = None
 
     @model_validator(mode="after")
     def _enabled_requires_backend(self) -> Self:
         if self.enabled and self.backend is None:
             raise ValueError("memory.enabled is true but no memory.backend is set")
+        if self.backend == "mem0" and self.mem0 is None:
+            raise ValueError("memory.backend is 'mem0' but the memory.mem0 section is missing")
         return self
 
 
@@ -153,11 +178,25 @@ class PipelinesFile(_VersionedFile):
 # --- decisions.yaml / risks.yaml --------------------------------------------
 
 
+class DecisionThresholds(_StrictModel):
+    """Confidence thresholds (V0.4). Declarative only: the decision service uses
+    `minimum_confidence` to *signal* that a fallback is required; choosing and
+    running the fallback (auto accept / LLM review / human) is V5.2."""
+
+    minimum_confidence: Probability
+
+
 class DecisionsSection(_StrictModel):
     escalation_order: list[DecisionLayer] = Field(min_length=1)
+    # Logical alias in models.yaml used by the probabilistic layer (V0.4).
+    # None = the decision foundation is not configured (no decision can be made).
+    model: Identifier | None = None
+    thresholds: DecisionThresholds | None = None
 
     @model_validator(mode="after")
     def _deterministic_first_human_last(self) -> Self:
+        if self.model is not None and self.thresholds is None:
+            raise ValueError("decisions.model is set but decisions.thresholds is missing")
         order = self.escalation_order
         if len(set(order)) != len(order):
             raise ValueError("escalation_order must not repeat layers")
@@ -337,7 +376,7 @@ def load_config_file[T: _VersionedFile](path: Path, model: type[T]) -> T:
 
 
 def _check_references(config_dir: Path, providers: ProvidersFile, models: ModelsFile,
-                      agents: AgentsFile) -> None:
+                      agents: AgentsFile, decisions: DecisionsFile) -> None:
     for alias, model in models.models.items():
         if model.provider not in providers.providers:
             raise ConfigValidationError(
@@ -350,6 +389,12 @@ def _check_references(config_dir: Path, providers: ProvidersFile, models: Models
                 f"roles.{role_name}.model '{role.model}' is not declared in models.yaml",
                 path=config_dir / "agents.yaml",
             )
+    decision_model = decisions.decisions.model
+    if decision_model is not None and decision_model not in models.models:
+        raise ConfigValidationError(
+            f"decisions.model '{decision_model}' is not declared in models.yaml",
+            path=config_dir / "decisions.yaml",
+        )
 
 
 def load_config(harness_root: Path) -> HarnessConfig:
@@ -372,7 +417,7 @@ def load_config(harness_root: Path) -> HarnessConfig:
     risks = load_config_file(config_dir / "risks.yaml", RisksFile)
     pipelines = load_config_file(config_dir / "pipelines.yaml", PipelinesFile)
 
-    _check_references(config_dir, providers, models, agents)
+    _check_references(config_dir, providers, models, agents, decisions)
 
     project_root = resolve_path(harness_root, project.project.root)
     if not project_root.is_dir():

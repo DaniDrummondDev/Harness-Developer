@@ -45,7 +45,7 @@ def test_load_config_returns_typed_domain_object(harness_root: Path) -> None:
     assert config.project.name == "ai-engineering-harness"
     assert config.risks.levels == ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
     assert config.decisions.escalation_order[0] == "deterministic"
-    assert config.modes["interactive"].enabled is True
+    assert config.modes[ExecutionMode.INTERACTIVE].enabled is True
     assert config.memory.enabled is False
     assert all(not provider.enabled for provider in config.providers.values())
 
@@ -246,6 +246,7 @@ def test_valid_references(harness_root: Path, write_config: WriteConfig) -> None
         version: 1
         models:
           reasoning: {provider: openai, model_id: some-model}
+          decision: {provider: jev, model_id: jev-latest}
     """)
     write_config("agents.yaml", """
         version: 1
@@ -254,6 +255,7 @@ def test_valid_references(harness_root: Path, write_config: WriteConfig) -> None
     """)
     config = load_config(harness_root)
     assert config.roles["architect"].model == "reasoning"
+    assert config.decisions.model == "decision"
 
 
 def test_all_config_errors_share_base_class() -> None:
