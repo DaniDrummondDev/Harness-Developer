@@ -1,0 +1,9 @@
+# Project identity. Everything project-specific lives in config/, never in orchestrator/.
+version: 1
+project:
+  name: ai-engineering-harness
+  description: AI Engineering Harness developed with its own foundation.
+  # Target project root, relative to the harness root (this `engineering/` folder).
+  root: ..
+  stack:
+    - python

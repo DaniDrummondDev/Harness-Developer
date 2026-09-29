@@ -1,0 +1,5 @@
+# Context Engineering (V1.x). Declared only; no context engine in V0.
+version: 1
+context:
+  enabled: false
+  description: Candidate discovery, classification, scoring and budget.

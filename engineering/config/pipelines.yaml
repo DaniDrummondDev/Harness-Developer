@@ -1,0 +1,15 @@
+# Pipelines (development, integration, release, deployment). Declared only in V0.
+version: 1
+pipelines:
+  development:
+    enabled: false
+    description: Task -> context -> implementation -> gates -> review.
+  integration:
+    enabled: false
+    description: Integration and verification before release.
+  release:
+    enabled: false
+    description: Build, artifacts, versioning and release candidate.
+  deployment:
+    enabled: false
+    description: Environment deploy, smoke tests and rollback.

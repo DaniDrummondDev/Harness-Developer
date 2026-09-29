@@ -1,0 +1,22 @@
+# Provider ids (keys) -> adapter kind. Consumed by ModelResolver (V0.2): a model whose
+# provider is `enabled: false` cannot be resolved (fail closed). No vendor adapter exists
+# yet (OpenAI/Anthropic/NVIDIA: V2.x, Jev: V0.4), so every provider stays disabled.
+# Never put API keys in this file.
+version: 1
+providers:
+  openai:
+    kind: openai
+    enabled: false
+    description: Reasoning, architecture and review.
+  anthropic:
+    kind: anthropic
+    enabled: false
+    description: Implementation and repository work (Claude).
+  nvidia:
+    kind: nvidia
+    enabled: false
+    description: Additional inference capacity.
+  jev:
+    kind: jev
+    enabled: false
+    description: Structured probabilistic decisions.

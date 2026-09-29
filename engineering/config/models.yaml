@@ -1,0 +1,10 @@
+# Logical model aliases -> provider + the provider's own model identifier (`model_id`).
+# Code refers only to the alias; switching provider/model is an edit here (V0.2).
+# Each `provider` must exist in providers.yaml. Empty until a vendor adapter exists.
+version: 1
+models: {}
+# Example:
+# models:
+#   reasoning:
+#     provider: openai
+#     model_id: <model-id>

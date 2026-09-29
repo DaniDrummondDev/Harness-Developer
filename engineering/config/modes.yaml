@@ -1,0 +1,13 @@
+# Operating modes (V0.1). Both modes must be declared; unknown modes are rejected.
+# `enabled` is enforced when a request is admitted (orchestrator/core/admission.py):
+# requests of a disabled mode are refused. Which sources belong to which mode is a
+# domain invariant (orchestrator/core/request.py), not configuration.
+version: 1
+modes:
+  interactive:
+    enabled: true
+    description: Started by a human request (CLI, MCP, Claude Code, Codex, API).
+  autonomous:
+    # Stays disabled until the state machine / autonomous loop exist (V6, V13).
+    enabled: false
+    description: Driven by the state machine from roadmap, sprint and pending tasks.

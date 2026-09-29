@@ -1,0 +1,9 @@
+# Risk levels ordered lowest -> highest (risk engine: V9).
+version: 1
+risks:
+  levels:
+    - LOW
+    - MEDIUM
+    - HIGH
+    - CRITICAL
+  default: MEDIUM

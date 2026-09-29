@@ -1,0 +1,10 @@
+# Decision escalation order (implemented in V5). Layers are provider-agnostic:
+# deterministic -> probabilistic (e.g. Jev) -> reasoning (LLM) -> human.
+# Invariants: starts with deterministic, no repeats, human (if present) is last.
+version: 1
+decisions:
+  escalation_order:
+    - deterministic
+    - probabilistic
+    - reasoning
+    - human

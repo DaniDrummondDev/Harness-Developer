@@ -1,0 +1,7 @@
+# Long-term memory (Mem0 self-hosted, V0.3). Declared only; nothing connects in V0.
+# If enabled is true, backend is required.
+version: 1
+memory:
+  enabled: false
+  backend: null
+  description: Operational long-term memory. Never a source of truth.

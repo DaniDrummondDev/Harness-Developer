@@ -1,0 +1,25 @@
+# Agent roles are decoupled from providers: a role references a model alias
+# from models.yaml (or null while unassigned). Role execution arrives in V2.
+version: 1
+roles:
+  architect:
+    description: Architecture, trade-offs, ADRs, roadmap and sprint definition.
+    model: null
+  implementer:
+    description: Implementation, refactoring, tests and structured reports.
+    model: null
+  reviewer:
+    description: Diff review, contract adherence, scope drift and risk.
+    model: null
+  test_engineer:
+    description: Derives tests from requirements and invariants.
+    model: null
+  validator:
+    description: Runs deterministic gates.
+    model: null
+  release_engineer:
+    description: Build, release candidate and release notes.
+    model: null
+  deployment_engineer:
+    description: Deploy, smoke tests, rollback and post-deploy checks.
+    model: null
