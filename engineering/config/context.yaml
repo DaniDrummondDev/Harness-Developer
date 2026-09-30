@@ -1,6 +1,7 @@
-# Context Engineering (V1.x). V1.1 implements Context Candidate Discovery only:
-# it lists sources that MAY be relevant to a request. It does not classify,
-# score, budget or select anything (V1.2+). `enabled` gates `context discover`.
+# Context Engineering (V1.x). V1.1 Context Candidate Discovery lists sources that
+# MAY be relevant to a request; V1.2 Context Classification labels each one
+# REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED. Nothing is budgeted or selected
+# for a prompt yet (V1.3+). `enabled` gates `context discover|classify`.
 #
 # Every path is relative to the project root (project.yaml `root`) and must stay
 # inside it; `..`, absolute paths and `~` are rejected. Limits protect the
@@ -8,7 +9,7 @@
 version: 1
 context:
   enabled: true
-  description: Candidate discovery (V1.1); classification, scoring and budget come later.
+  description: Candidate discovery (V1.1) and classification (V1.2); budget comes later.
   discovery:
     # Agent/project instruction files (only those that exist are listed).
     instruction_files:
@@ -32,3 +33,11 @@ context:
     max_files: 5000           # files visited per walked root
     max_file_bytes: 1048576   # larger files are skipped (never read)
     memory_results: 5         # memory search hits (only when memory.enabled)
+  classification:
+    # Deterministic rules always run first and are never overridden. Candidates
+    # no rule resolves go to the decision layer (decisions.yaml `model`, e.g. Jev)
+    # when `probabilistic` is true AND that provider is enabled; its
+    # `thresholds.minimum_confidence` is the acceptance threshold. Otherwise, below
+    # the threshold or on provider failure -> conservative fallback: OPTIONAL.
+    probabilistic: true
+    max_decisions: 50         # decision calls per run; further candidates fall back

@@ -2,7 +2,7 @@
 
 ## 1. Objetivo
 
-Este documento descreve a arquitetura atual e a estrutura de pastas do AI Engineering Harness após a conclusão do **V1.1 — Context Candidate Discovery** (sobre o V1 — Global Library).
+Este documento descreve a arquitetura atual e a estrutura de pastas do AI Engineering Harness após a conclusão do **V1.2 — Context Classification** (sobre o V1.1 — Context Candidate Discovery e o V1 — Global Library).
 
 Ele possui dois objetivos complementares:
 
@@ -96,9 +96,10 @@ V0.3 — Memory Foundation        COMPLETE
 V0.4 — Decision Foundation      COMPLETE
 V1   — Global Library           COMPLETE
 V1.1 — Context Candidate Discovery COMPLETE
+V1.2 — Context Classification  COMPLETE
 ```
 
-Próxima versão: **V1.2 — Context Classification** (não iniciada).
+Próxima versão: **V1.3 — Context Budget** (não iniciada).
 
 O projeto possui agora:
 
@@ -138,6 +139,12 @@ O projeto possui agora:
   candidatos tipados, determinísticos e com proveniência, vindos da Global Library,
   instruction files, ADRs, documentação, arquivos citados na requisição e memória (opt-in);
 - comando `context discover` e check `context` no `doctor` (só valida caminhos);
+- Context Classification (V1.2): `ContextDiscoveryResult` → `ContextClassificationResult`,
+  cada candidato com exatamente uma classe (REQUIRED/HIGH_VALUE/OPTIONAL/EXCLUDED), quem
+  decidiu (`deterministic`/`probabilistic`/`fallback`) e evidência estruturada; regras
+  determinísticas primeiro, Jev (via `DecisionService`) para o restante quando habilitado,
+  fallback conservador OPTIONAL;
+- comando `context classify` e check estrutural `classification` no `doctor`;
 - contract tests;
 - testes unitários e de integração (incluindo prova real opt-in contra Mem0 e contra Jev);
 - quality gates locais com pytest, Ruff e Mypy.
@@ -150,8 +157,8 @@ Ainda não estão implementados:
 - Decision Policy Engine (deterministic → Jev → LLM → human; V5);
 - fallback automático para LLM ou humano;
 - ingestão automática de memória;
-- classificação de contexto (REQUIRED/HIGH_VALUE/OPTIONAL/EXCLUDED), scoring, budget,
-  ContextPlan, context package e telemetria de contexto (V1.2–V1.5);
+- budget de contexto, truncation, ContextPlan, context package, escalation LLM e telemetria
+  de contexto (V1.3–V1.5); classificação via reasoning LLM (não há runtime LLM real);
 - descoberta de task/sprint contracts, Git, previous runs, releases e findings (sem store real);
 - composição Global Library + conhecimento específico do projeto;
 - agent execution;
@@ -200,7 +207,7 @@ engineering/orchestrator/
 
 ---
 
-## 5. Estrutura real após o V1.1
+## 5. Estrutura real após o V1.2
 
 A estrutura funcional atualmente implementada é:
 
@@ -248,12 +255,18 @@ engineering/
 │   │   ├── loader.py         # resolve_library_root; discover/read/parse/validate
 │   │   └── library.py        # GlobalLibrary: index, by_type, get, resolve
 │   │
-│   ├── context/              # V1.1: Context Candidate Discovery
+│   ├── context/              # V1.1: Context Candidate Discovery; V1.2: classification
 │   │   ├── __init__.py
-│   │   ├── models.py         # CandidateKind, ContextCandidate, SourceReport, ContextDiscoveryResult
+│   │   ├── models.py         # CandidateKind, ContextCandidate, Provenance(match), ContextDiscoveryResult
 │   │   ├── files.py          # ProjectFiles: roots contidas, walks limitados, exclusões
 │   │   ├── discoverers.py    # library, instructions, adrs, documentation, repository_hints, memory
-│   │   └── discovery.py      # ContextCandidateDiscovery (merge/sort), build_discovery
+│   │   ├── discovery.py      # ContextCandidateDiscovery (merge/sort), build_discovery
+│   │   └── classification/   # V1.2
+│   │       ├── __init__.py
+│   │       ├── models.py         # ContextClass, SelectedBy, Evidence, ContextClassification, result
+│   │       ├── deterministic.py  # ClassificationRule table, DeterministicClassifier
+│   │       ├── probabilistic.py  # Decider protocol, ProbabilisticClassifier (Jev via DecisionService)
+│   │       └── classifier.py     # ContextClassifier, build_classifier
 │   │
 │   └── utils/
 │       ├── files.py
@@ -294,7 +307,8 @@ engineering/
 │       ├── sprint-v0.3.md
 │       ├── sprint-v0.4.md
 │       ├── sprint-v1.md
-│       └── sprint-v1.1.md
+│       ├── sprint-v1.1.md
+│       └── sprint-v1.2.md
 │
 ├── tests/
 │   ├── conftest.py
@@ -307,7 +321,7 @@ engineering/
 └── README.md
 ```
 
-A árvore acima representa o estado funcional pós-V1.1.
+A árvore acima representa o estado funcional pós-V1.2.
 
 Diretórios futuros devem ser adicionados somente quando a versão correspondente os exigir.
 
@@ -325,7 +339,7 @@ Não deve conter configuração específica de um projeto consumidor.
 
 Responsável pela interface CLI atual.
 
-A CLI existente suporta os comandos já implementados pelo projeto: `doctor`, `intake`, o grupo `memory` (V0.3), o grupo `decision` (V0.4: classify, route, severity, relevance, health), o grupo `library` (V1: inspect, resolve) e o grupo `context` (V1.1: discover).
+A CLI existente suporta os comandos já implementados pelo projeto: `doctor`, `intake`, o grupo `memory` (V0.3), o grupo `decision` (V0.4: classify, route, severity, relevance, health), o grupo `library` (V1: inspect, resolve) e o grupo `context` (V1.1: discover; V1.2: classify).
 
 Ela deve permanecer fina.
 
@@ -430,6 +444,11 @@ Check `context` (V1.1): executado quando `context.enabled`; apenas valida os cam
 discovery configurados (FAIL se algum resolver fora do projeto; caminhos opcionais ausentes
 aparecem no detalhe do PASS). Nunca executa discovery (que exige uma requisição).
 
+Check `classification` (V1.2): executado junto com `context`; estrutural e offline. Informa a
+estratégia que `context classify` usará (regras determinísticas; modelo de decisão quando
+`classification.probabilistic` e o provider estão habilitados; fallback OPTIONAL). WARN se
+`probabilistic: true` sem `decisions.model`. Nunca classifica nem chama o provider.
+
 ### `orchestrator/core/exceptions.py`
 
 Define erros tipados do Harness, incluindo erros de configuração, request e provider.
@@ -499,12 +518,13 @@ Responsável por:
   `artifacts`/`by_type`/`get` e `resolve(ProjectProfile)` determinístico.
 
 Não conhece CLI, providers, Jev, Mem0, rede ou subprocessos (teste de isolamento). O core
-(`core/`) não importa `library/`; CLI, `doctor` e (desde o V1.1) `context/` a consomem.
+(`core/`) não importa `library/`; CLI, `doctor` e (desde o V1.1) `context/` a consomem
+(V1.2: `classification/deterministic.py` lê o vocabulário `Authority`).
 Não seleciona, classifica nem orça contexto.
 
 ### `orchestrator/context/`
 
-Implementado no V1.1 (somente Context Candidate Discovery).
+V1.1: Context Candidate Discovery. V1.2: Context Classification (`context/classification/`).
 
 ```text
 EngineeringRequest
@@ -525,13 +545,37 @@ Responsável por:
   sem seguir diretórios symlink, exclusões fixas e configuráveis, nomes de secrets
   bloqueados, limite de arquivos por walk e de tamanho, leitura só do início de Markdown;
 - deduplicação por recurso canônico (arquivo resolvido / id de memória) preservando todas
-  as proveniências.
+  as proveniências e (V1.2) toda a metadata: chaves de ambos os lados; em conflito vale o
+  valor do kind vencedor e o valor descartado fica em `metadata["merge_conflicts"]`;
+- `Provenance.match` (V1.2): como um hint da requisição casou (`path`, `file_name`,
+  `ambiguous_file_name`, `directory`), para a classificação não interpretar texto livre.
 
 A requisição é o sujeito da descoberta, não um candidato. Erros fatais
 (`ContextDiscoveryError`): contexto desabilitado ou caminho configurado fora do projeto.
 Fontes ausentes, vazias ou indisponíveis geram warnings. Não importa CLI, doctor,
 providers, decisions (sem Jev), serviço/adapters de memória, rede ou subprocessos.
 Fontes ainda não suportadas: task/sprint contracts, Git, previous runs, releases, findings.
+
+Context Classification (V1.2):
+
+```text
+ContextDiscoveryResult
+  → DeterministicClassifier     tabela ordenada de regras; a primeira que casa decide
+  → não resolvidos apenas:
+      ProbabilisticClassifier  Decider (DecisionService/Jev), 1 decisão por candidato,
+                               opções ordenadas EXCLUDED < OPTIONAL < HIGH_VALUE (nunca REQUIRED),
+                               threshold = decisions.yaml minimum_confidence
+      ou fallback              OPTIONAL + evidência estruturada + warning
+  → ContextClassificationResult(request, candidates, counts, decisions, warnings,
+                                decision_provider)   ordenado por classe, kind, id
+```
+
+Precedência estrutural: candidato resolvido deterministicamente nunca é enviado ao Jev; o
+modelo rejeita memória REQUIRED, decisão probabilística REQUIRED e fallback ≠ OPTIONAL.
+EXCLUDED permanece no resultado. Só `classification/probabilistic.py` importa contratos da
+camada de decisão (`decisions.models`, `providers.base`) — nunca adapter, service ou rede;
+a composição (`open_decisions`) fica na CLI. Não há budget, truncation nem seleção (V1.3+).
+Regras e fallback: `engineering/docs/sprints/sprint-v1.2.md`.
 
 ### `orchestrator/utils/shell.py`
 
@@ -824,6 +868,9 @@ A fundação já valida:
   `source_roots` (caminhos relativos POSIX, sem `..`, `/`, `~`, normalizados),
   `exclude_dirs` (nomes), `max_files`, `max_file_bytes`, `memory_results` (limitados);
   campos extras (ex.: budget) rejeitados.
+- `context.yaml` (V1.2): seção `classification` com `probabilistic` (bool, default true) e
+  `max_decisions` (1..500, default 50). O threshold não é duplicado: vem de
+  `decisions.yaml` `thresholds.minimum_confidence`. Campos extras rejeitados.
 
 A Global Library não é configuração: seus artefatos são validados pelo próprio loader
 (`orchestrator/library/`), com schema versionado próprio (`version: 1`).
@@ -1002,8 +1049,9 @@ V1.x — Context Engineering
 O V1.1 criou `context/` com Context Candidate Discovery; a `GlobalLibrary` é uma de suas
 fontes (via `resolve`) e a `Authority` de cada artefato segue como metadata do candidato,
 insumo para a precedência `Policies > ADRs > Task > Project guidelines >
-Skills/specialties > ... > Memory` que a classificação (V1.2) aplicará. Classification,
-budget, escalation e telemetry (V1.2–V1.5) consomem `ContextDiscoveryResult`.
+Skills/specialties > ... > Memory`. O V1.2 criou `context/classification/`, que aplica essa
+precedência (policy aplicável → REQUIRED; memória nunca REQUIRED) e produz
+`ContextClassificationResult`; budget, escalation e telemetry (V1.3–V1.5) o consumirão.
 
 ### `agents/`
 
@@ -1098,16 +1146,16 @@ Essa ordem substitui sequências anteriores presentes em versões antigas da doc
 
 ## 15. Próxima versão
 
-O V1.1 — Context Candidate Discovery está COMPLETE (ver
-`engineering/docs/sprints/sprint-v1.1.md`).
+O V1.2 — Context Classification está COMPLETE (ver
+`engineering/docs/sprints/sprint-v1.2.md`).
 
 A próxima versão é:
 
 ```text
-V1.2 — Context Classification
+V1.3 — Context Budget
 ```
 
-A classificação de contexto ainda não foi iniciada.
+O budget de contexto ainda não foi iniciado.
 
 ---
 
@@ -1327,6 +1375,19 @@ Ids estáveis (`policy/secrets`, `adr/<path>`, `doc/<path>`, `source/<path>`,
 discoverers vira um único candidato com todas as proveniências; o `kind` segue a ordem de
 prioridade de `CandidateKind`. Título nunca participa da identidade.
 
+### Classification compõe, não muta (V1.2)
+
+`ClassifiedContextCandidate` envolve o `ContextCandidate` original (composição); a classe,
+`selected_by` e a `Evidence` estruturada (id estável da regra ou motivo do fallback) ficam em
+`ContextClassification`. Invariantes no modelo: memória nunca REQUIRED; a camada
+probabilística nunca produz REQUIRED; fallback é sempre OPTIONAL.
+
+### Determinístico primeiro, por construção (V1.2)
+
+Só candidatos sem regra determinística chegam ao `Decider`; nenhuma resposta probabilística
+pode rebaixar ou promover uma decisão determinística. Provider indisponível interrompe as
+chamadas no run e vira fallback visível (warning), nunca classificação silenciosa.
+
 ### Alias lógico separado do model id externo
 
 Configuração pode referenciar modelos semanticamente sem acoplar o core ao identificador do vendor.
@@ -1382,7 +1443,20 @@ Identificadas no V1.1:
 - a busca de memória usa a instrução inteira como query e só o scope de projeto
   (`origin_ref` é texto livre, não identifica task/run com segurança);
 - walks são refeitos a cada requisição (sem cache/índice);
-- o merge descarta a metadata do candidato de menor prioridade (a proveniência é mantida).
+- ~~o merge descarta a metadata do candidato de menor prioridade~~ (resolvido no V1.2:
+  metadata unida; conflitos registrados em `merge_conflicts`).
+
+Identificadas no V1.2:
+
+- sem Jev habilitado, tudo o que não tem regra determinística vira OPTIONAL (documentação,
+  ADRs aceitos, conhecimento `always`, memória): classificação correta, porém pouco seletiva;
+- uma chamada de decisão por candidato não resolvido (sem contrato de batch no
+  `DecisionProvider`); `max_decisions` limita custo/latência;
+- a regra de artefatos gerados usa uma lista fixa de nomes/sufixos (lock files, `.min.js`,
+  `.map`);
+- o fallback via reasoning LLM (roadmap) não existe: não há runtime LLM real (V2.x);
+- `minimum_confidence` é compartilhado com as demais decisões (não há threshold específico
+  de classificação; não calibrado).
 
 Não devem ser resolvidos preventivamente sem necessidade real.
 
@@ -1436,17 +1510,20 @@ Global Library (skills, guidelines, policies, rules, specialties; deterministic 
         ↓
 Context Candidate Discovery (request → typed, deduplicated candidates with provenance)
         ↓
-Ready for Context Classification (V1.2)
+Context Classification (REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED; deterministic → Jev → fallback)
+        ↓
+Ready for Context Budget (V1.3)
 ```
 
-O Harness já lista, para uma requisição, as fontes que podem ser relevantes, mas nada
-ainda classifica, pontua, orça ou injeta contexto em prompts.
+O Harness já lista e classifica, para uma requisição, as fontes que podem ser relevantes,
+mas nada ainda orça, trunca ou injeta contexto em prompts.
 
 Ainda não existe provider externo real de inferência generativa.
 
 A memória operacional existe, mas é operada apenas explicitamente e nunca é source of truth.
 
-Ainda não existe Context Engineering.
+Context Engineering existe até a classificação (V1.1–V1.2); budget, pacote de contexto e
+telemetria de contexto ainda não.
 
 O decision provider real (Jev) existe como camada probabilística isolada; não há Decision
 Policy Engine e nenhum fallback é executado automaticamente.

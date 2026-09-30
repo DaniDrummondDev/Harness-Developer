@@ -3,7 +3,8 @@
 A *candidate* is a source that MAY be relevant to a request. Discovery answers
 "what exists that could matter?", never "what is best?" or "what fits in the
 prompt?": a candidate carries no classification (REQUIRED/HIGH_VALUE/...), no
-relevance score and no budget information — those are V1.2/V1.3.
+relevance score and no budget information. Classification (V1.2) wraps a
+candidate in `context/classification/models.py` without changing it; budget is V1.3.
 
 Candidates are references plus metadata, not content: files are pointed to by
 `CandidateReference` (store + relative path) so a later stage can load only what
@@ -72,15 +73,31 @@ class CandidateReference(_Model):
         return f"{self.store}:{self.path}"
 
 
+class ReferenceMatch(StrEnum):
+    """How a request hint resolved to a file (set by `repository_hints` only).
+
+    Structured so classification (V1.2) never parses the free-text `reason`.
+    """
+
+    PATH = "path"  # the request names this file's path
+    FILE_NAME = "file_name"  # names its file name, and only this file has it
+    AMBIGUOUS_FILE_NAME = "ambiguous_file_name"  # names a file name several files share
+    DIRECTORY = "directory"  # names the directory holding it (direct entries only)
+
+
 class Provenance(_Model):
     """Which discoverer found the candidate and why (audit trail)."""
 
     discoverer: str
     reason: str
+    match: ReferenceMatch | None = None
 
 
 # Kind-specific facts for later stages (authority, tags, ADR status, size...).
 MetadataValue = str | int | float | bool | tuple[str, ...]
+
+# Metadata key listing values dropped when merging duplicates (see discovery._merge).
+MERGE_CONFLICTS_KEY = "merge_conflicts"
 
 
 class ContextCandidate(_Model):

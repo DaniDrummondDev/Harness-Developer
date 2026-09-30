@@ -22,12 +22,15 @@ Output conventions:
 - `context discover` (V1.1): ContextDiscoveryResult as JSON on stdout, exit 0
   (warnings are part of the JSON, not errors); invalid request/config/library,
   disabled context or an unsafe discovery path -> `error: ...`, exit 1;
+- `context classify` (V1.2): discover + classify, ContextClassificationResult as
+  JSON, exit 0 (a disabled/unreachable decision layer is a warning in the JSON:
+  unresolved candidates use the conservative fallback); same errors as discover;
 - usage errors (unknown command/option, bad --log-level) -> Typer/Click, exit 2.
 
 Commands: root (identity + help), `doctor` (V0), `intake` (V0.1), the
 `memory` group (V0.3: health, add, search, update, delete), the `decision`
 group (V0.4: classify, route, severity, relevance, health) and the `library`
-group (V1: inspect, resolve) and the `context` group (V1.1: discover). New
+group (V1: inspect, resolve) and the `context` group (V1.1: discover; V1.2: classify). New
 commands are added as `@app.command()` functions here, delegating logic to
 their own module.
 """
@@ -46,11 +49,13 @@ from rich.table import Table
 
 from orchestrator import HARNESS_NAME, __version__
 from orchestrator.config import HARNESS_ROOT_ENV, HarnessConfig, load_config, resolve_harness_root
+from orchestrator.context.classification.classifier import build_classifier
 from orchestrator.context.discovery import build_discovery
+from orchestrator.context.models import ContextDiscoveryResult
 from orchestrator.core.admission import admit
 from orchestrator.core.exceptions import HarnessError
 from orchestrator.core.request import Intent, RequestSource
-from orchestrator.decisions.service import open_decisions
+from orchestrator.decisions.service import DecisionService, open_decisions
 from orchestrator.doctor import CheckStatus, DoctorReport, run_doctor
 from orchestrator.intake import normalize_request
 from orchestrator.library.library import GlobalLibrary
@@ -110,7 +115,7 @@ def root_command(
         ),
     ] = False,
 ) -> None:
-    """AI Engineering Harness — engineering control plane (V1.1 context candidate discovery)."""
+    """AI Engineering Harness — engineering control plane (V1.2 context classification)."""
     try:
         configure_logging(log_level)
     except ValueError as exc:
@@ -498,8 +503,10 @@ def library_resolve(
 # --- context (V1.1) ------------------------------------------------------------------
 
 context_app = typer.Typer(
-    help="Context Engineering. V1.1: candidate discovery only — lists sources that MAY be "
-    "relevant; nothing is classified, scored, budgeted or selected. No LLM, no Jev.",
+    help="Context Engineering. `discover` (V1.1) lists sources that MAY be relevant; "
+    "`classify` (V1.2) labels each REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED "
+    "(deterministic rules first, then Jev if enabled, else a conservative fallback). "
+    "Nothing is budgeted or selected for a prompt.",
     no_args_is_help=True,
     rich_markup_mode=None,
 )
@@ -516,32 +523,68 @@ def _memory_for_context(config: HarnessConfig) -> tuple[MemoryService | None, st
         return None, str(exc)
 
 
+def _decider_for_context(config: HarnessConfig) -> tuple[DecisionService | None, str | None]:
+    """The decision layer is optional for classification: when it cannot be opened
+    (provider disabled, no API key...), classification goes on deterministically."""
+    if not config.context.classification.probabilistic:
+        return None, None
+    try:
+        return open_decisions(config), None
+    except HarnessError as exc:
+        return None, str(exc)
+
+
+_InstructionArg = Annotated[str, typer.Argument(help="The request, in natural language.")]
+_IntentOpt = Annotated[
+    str | None, typer.Option("--intent", help=f"Kind of work: {', '.join(Intent)}.")
+]
+_RefOpt = Annotated[
+    str | None, typer.Option("--ref", help="Originating artifact (task/sprint id or path).")
+]
+
+
+def _discover(
+    config: HarnessConfig, instruction: str, intent: str | None, ref: str | None
+) -> ContextDiscoveryResult:
+    """Normalize and admit a CLI request, then discover its candidates (raises HarnessError)."""
+    request = normalize_request(
+        source=RequestSource.CLI, instruction=instruction, intent=intent, origin_ref=ref
+    )
+    admitted = admit(request, config.enabled_modes)
+    library = GlobalLibrary.load(resolve_library_root())
+    memory, memory_error = _memory_for_context(config)
+    discovery = build_discovery(config, library, memory=memory, memory_unavailable=memory_error)
+    return discovery.discover(admitted.request)
+
+
 @context_app.command("discover")
 def context_discover(
-    ctx: typer.Context,
-    instruction: Annotated[str, typer.Argument(help="The request, in natural language.")],
-    intent: Annotated[
-        str | None,
-        typer.Option("--intent", help=f"Kind of work: {', '.join(Intent)}."),
-    ] = None,
-    ref: Annotated[
-        str | None, typer.Option("--ref", help="Originating artifact (task/sprint id or path).")
-    ] = None,
+    ctx: typer.Context, instruction: _InstructionArg, intent: _IntentOpt = None,
+    ref: _RefOpt = None,
 ) -> None:
     """Normalize and admit a CLI request, then list its context candidates as JSON."""
     state: CliState = ctx.find_root().obj
     try:
+        result = _discover(load_config(resolve_harness_root(state.root)), instruction, intent, ref)
+    except HarnessError as exc:
+        _fail(exc)
+    _echo_json(result.model_dump(mode="json"))
+
+
+@context_app.command("classify")
+def context_classify(
+    ctx: typer.Context, instruction: _InstructionArg, intent: _IntentOpt = None,
+    ref: _RefOpt = None,
+) -> None:
+    """Discover the request's context candidates, then classify each one
+    (REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED) as JSON. No budget, no selection."""
+    state: CliState = ctx.find_root().obj
+    try:
         config = load_config(resolve_harness_root(state.root))
-        request = normalize_request(
-            source=RequestSource.CLI, instruction=instruction, intent=intent, origin_ref=ref
-        )
-        admitted = admit(request, config.enabled_modes)
-        library = GlobalLibrary.load(resolve_library_root())
-        memory, memory_error = _memory_for_context(config)
-        discovery = build_discovery(
-            config, library, memory=memory, memory_unavailable=memory_error
-        )
-        result = discovery.discover(admitted.request)
+        discovered = _discover(config, instruction, intent, ref)
+        decider, decider_error = _decider_for_context(config)
+        classifier = build_classifier(config, decider=decider, decider_unavailable=decider_error)
+        result = classifier.classify(discovered)
     except HarnessError as exc:
         _fail(exc)
     _echo_json(result.model_dump(mode="json"))

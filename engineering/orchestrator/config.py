@@ -187,9 +187,22 @@ class DiscoverySection(_StrictModel):
     memory_results: int = Field(default=5, ge=1, le=50)
 
 
+class ClassificationSection(_StrictModel):
+    """Context Classification (V1.2). Deterministic rules always run first and are
+    never overridden. `probabilistic` lets candidates no rule resolves go to the
+    decision layer (decisions.yaml `model`, e.g. Jev), whose own
+    `thresholds.minimum_confidence` is the acceptance threshold (not duplicated
+    here). `max_decisions` caps decision calls per classification run; the rest
+    use the conservative fallback."""
+
+    probabilistic: bool = True
+    max_decisions: int = Field(default=50, ge=1, le=500)
+
+
 class ContextSection(FeatureSection):
     # `enabled` gates Context Engineering (consumed by context.discovery since V1.1).
     discovery: DiscoverySection = Field(default_factory=DiscoverySection)
+    classification: ClassificationSection = Field(default_factory=ClassificationSection)
 
 
 class ContextFile(_VersionedFile):

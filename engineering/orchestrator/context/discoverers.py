@@ -33,6 +33,7 @@ from orchestrator.context.models import (
     ContextCandidate,
     MetadataValue,
     Provenance,
+    ReferenceMatch,
     ReferenceStore,
     SourceStatus,
 )
@@ -58,14 +59,14 @@ class CandidateDiscoverer(Protocol):
 
 def _file_candidate(
     kind: CandidateKind, found: FoundFile, *, title: str, discoverer: str, reason: str,
-    metadata: dict[str, MetadataValue] | None = None,
+    metadata: dict[str, MetadataValue] | None = None, match: ReferenceMatch | None = None,
 ) -> ContextCandidate:
     return ContextCandidate(
         id=f"{kind}/{found.relative}",
         kind=kind,
         title=title,
         reference=CandidateReference(store=ReferenceStore.PROJECT, path=found.relative),
-        provenance=(Provenance(discoverer=discoverer, reason=reason),),
+        provenance=(Provenance(discoverer=discoverer, reason=reason, match=match),),
         metadata={"size_bytes": found.size, **(metadata or {})},
     )
 
@@ -253,6 +254,7 @@ class RepositoryHintsDiscoverer:
     root; a directory hint yields its direct files. A bare file name is matched
     exactly against a bounded walk of the source roots. Hints resolving outside
     the project, into excluded directories or to secret files are rejected.
+    Each provenance records how the hint matched (`ReferenceMatch`).
     """
 
     name = "repository_hints"
@@ -274,17 +276,19 @@ class RepositoryHintsDiscoverer:
                 hints_seen += 1
                 reason = f"named in the {field_name}: '{hint}'"
                 if "/" in hint:
-                    found, warning = self._path_hint(hint)
+                    found, match, warning = self._path_hint(hint)
                 else:
                     if by_name is None:
                         by_name, walk_warnings = self._index_names()
                         warnings.extend(walk_warnings)
                     found, warning = by_name.get(hint, []), None
+                    match = (ReferenceMatch.FILE_NAME if len(found) == 1
+                             else ReferenceMatch.AMBIGUOUS_FILE_NAME)
                 if warning:
                     warnings.append(warning)
                 candidates.extend(
                     _file_candidate(CandidateKind.SOURCE_CODE, f, title=f.relative,
-                                    discoverer=self.name, reason=reason)
+                                    discoverer=self.name, reason=reason, match=match)
                     for f in found
                 )
         if hints_seen == 0:
@@ -297,7 +301,7 @@ class RepositoryHintsDiscoverer:
         roots = [self._files.configured(r) for r in self._source_roots]
         return [self._files.root, *(r for r in roots if r != self._files.root)]
 
-    def _path_hint(self, hint: str) -> tuple[list[FoundFile], str | None]:
+    def _path_hint(self, hint: str) -> tuple[list[FoundFile], ReferenceMatch, str | None]:
         relative = hint.rstrip("/")
         options = [Path(relative)] if Path(relative).is_absolute() else [
             base / relative for base in self._bases()
@@ -310,15 +314,15 @@ class RepositoryHintsDiscoverer:
                 rejected = rejected or reason
                 continue
             if path.is_dir():
-                return self._direct_files(path), None
+                return self._direct_files(path), ReferenceMatch.DIRECTORY, None
             found, _ = self._files.check_file(path)
             if found is not None:
-                return [found], None
+                return [found], ReferenceMatch.PATH, None
             if path.exists():
                 rejected = rejected or "not an acceptable file (size or type)"
         if rejected:
-            return [], f"rejected hint '{hint}': {rejected}"
-        return [], f"hint '{hint}' not found in the project"
+            return [], ReferenceMatch.PATH, f"rejected hint '{hint}': {rejected}"
+        return [], ReferenceMatch.PATH, f"hint '{hint}' not found in the project"
 
     def _direct_files(self, directory: Path) -> list[FoundFile]:
         found_files = []

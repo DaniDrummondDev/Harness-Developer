@@ -21,10 +21,12 @@ from orchestrator.context.discovery import (
 )
 from orchestrator.context.files import ProjectFiles
 from orchestrator.context.models import (
+    MERGE_CONFLICTS_KEY,
     CandidateKind,
     CandidateReference,
     ContextCandidate,
     Provenance,
+    ReferenceMatch,
     ReferenceStore,
     SourceStatus,
 )
@@ -132,6 +134,53 @@ def test_duplicate_from_the_same_discoverer_keeps_one_provenance(tmp_path: Path)
     ).discover(request())
     assert keys(result) == ["source/a.py"]
     assert len(result.candidates[0].provenance) == 1
+
+
+# --- V1.1 debt (fixed in V1.2): metadata of the losing duplicate ---------------------------------
+
+
+def test_merge_keeps_metadata_of_every_duplicate(tmp_path: Path) -> None:
+    touch(tmp_path / "docs" / "adr" / "0001.md")
+    as_doc = file_candidate(CandidateKind.DOCUMENTATION, "docs/adr/0001.md", "documentation")
+    as_doc = as_doc.model_copy(update={"metadata": {"size_bytes": 9, "owner": "docs-team"}})
+    as_adr = file_candidate(CandidateKind.ADR, "docs/adr/0001.md", "adrs").model_copy(
+        update={"metadata": {"size_bytes": 9, "status": "Superseded by ADR-0003"}}
+    )
+    hinted = file_candidate(CandidateKind.SOURCE_CODE, "docs/adr/0001.md", "repository_hints")
+    hinted = hinted.model_copy(update={"provenance": (Provenance(
+        discoverer="repository_hints", reason="named in the request: 'docs/adr/0001.md'",
+        match=ReferenceMatch.PATH),)})
+    result = ContextCandidateDiscovery(
+        [StaticDiscoverer("documentation", as_doc), StaticDiscoverer("adrs", as_adr),
+         StaticDiscoverer("repository_hints", hinted)],
+        roots={ReferenceStore.PROJECT: tmp_path},
+    ).discover(request())
+    (merged,) = result.candidates
+    assert merged.kind is CandidateKind.ADR
+    assert merged.metadata == {
+        "size_bytes": 9, "status": "Superseded by ADR-0003", "owner": "docs-team",
+    }
+    assert [(p.discoverer, p.match) for p in merged.provenance] == [
+        ("adrs", None), ("documentation", None), ("repository_hints", ReferenceMatch.PATH),
+    ]
+
+
+def test_merge_records_contradictory_metadata_instead_of_dropping_it(tmp_path: Path) -> None:
+    touch(tmp_path / "docs" / "adr" / "0001.md")
+    as_doc = file_candidate(CandidateKind.DOCUMENTATION, "docs/adr/0001.md", "documentation")
+    as_doc = as_doc.model_copy(update={"metadata": {"status": "Accepted"}})
+    as_adr = file_candidate(CandidateKind.ADR, "docs/adr/0001.md", "adrs").model_copy(
+        update={"metadata": {"status": "Deprecated"}}
+    )
+    result = ContextCandidateDiscovery(
+        [StaticDiscoverer("documentation", as_doc), StaticDiscoverer("adrs", as_adr)],
+        roots={ReferenceStore.PROJECT: tmp_path},
+    ).discover(request())
+    metadata = result.candidates[0].metadata
+    assert metadata["status"] == "Deprecated"  # the winning (more specific) kind's value
+    assert metadata[MERGE_CONFLICTS_KEY] == (
+        "status: kept 'Deprecated' (adr), dropped 'Accepted' (doc via documentation)",
+    )
 
 
 def test_output_is_sorted_by_kind_then_id(tmp_path: Path) -> None:
@@ -464,14 +513,22 @@ def _imports(path: Path) -> set[str]:
     return names
 
 
+# V1.2: the probabilistic classifier may use the decision layer's typed contracts
+# (never an adapter, the service, a registry or the network); nothing else may.
+DECISION_CONTRACTS = {"orchestrator.decisions.models", "orchestrator.providers.base"}
+
+
 def test_context_does_not_know_interfaces_providers_decisions_or_network() -> None:
     forbidden = ("orchestrator.cli", "orchestrator.doctor", "orchestrator.providers",
                  "orchestrator.decisions", "orchestrator.memory.service",
                  "orchestrator.memory.mem0", "orchestrator.memory.fake", "typer", "rich",
                  "urllib", "http", "socket", "subprocess", "orchestrator.utils.shell")
+    probabilistic = PACKAGE / "context" / "classification" / "probabilistic.py"
     for path in (PACKAGE / "context").rglob("*.py"):
-        leaked = {n for n in _imports(path) if n.startswith(forbidden)}
+        allowed = DECISION_CONTRACTS if path == probabilistic else set()
+        leaked = {n for n in _imports(path) if n.startswith(forbidden)} - allowed
         assert not leaked, f"{path} imports {leaked}"
+    assert DECISION_CONTRACTS <= _imports(probabilistic)
 
 
 def test_context_uses_no_execution_primitives() -> None:

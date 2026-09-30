@@ -18,7 +18,12 @@ from orchestrator.context.discoverers import (
     extract_hints,
 )
 from orchestrator.context.files import ProjectFiles
-from orchestrator.context.models import CandidateKind, ReferenceStore, SourceStatus
+from orchestrator.context.models import (
+    CandidateKind,
+    ReferenceMatch,
+    ReferenceStore,
+    SourceStatus,
+)
 from orchestrator.core.exceptions import ContextDiscoveryError
 from orchestrator.core.request import EngineeringRequest
 from orchestrator.intake import normalize_request
@@ -202,22 +207,39 @@ def test_explicit_path_becomes_candidate(files: ProjectFiles) -> None:
     assert candidate.provenance[0].reason == (
         "named in the request: 'app/Http/OrderController.php'"
     )
+    assert candidate.provenance[0].match is ReferenceMatch.PATH
     assert found.warnings == ()
 
 
 def test_path_relative_to_a_source_root(files: ProjectFiles) -> None:
     found = RepositoryHintsDiscoverer(files, ["src"]).discover(request("edit billing/tax.py"))
     assert ids(found) == ["source/src/billing/tax.py"]
+    assert found.candidates[0].provenance[0].match is ReferenceMatch.PATH
 
 
 def test_file_name_matches_every_file_with_that_name(files: ProjectFiles) -> None:
     found = RepositoryHintsDiscoverer(files, ["src", "app"]).discover(request("fix invoice.py"))
     assert ids(found) == ["source/src/billing/invoice.py", "source/src/other/invoice.py"]
+    assert {c.provenance[0].match for c in found.candidates} == {
+        ReferenceMatch.AMBIGUOUS_FILE_NAME
+    }
+
+
+def test_unique_file_name_is_an_exact_match(files: ProjectFiles) -> None:
+    found = RepositoryHintsDiscoverer(files, ["src"]).discover(request("fix tax.py"))
+    assert ids(found) == ["source/src/billing/tax.py"]
+    assert found.candidates[0].provenance[0].match is ReferenceMatch.FILE_NAME
 
 
 def test_directory_hint_lists_its_direct_files(files: ProjectFiles) -> None:
     found = RepositoryHintsDiscoverer(files, ["."]).discover(request("look at src/billing/"))
     assert ids(found) == ["source/src/billing/invoice.py", "source/src/billing/tax.py"]
+    assert {c.provenance[0].match for c in found.candidates} == {ReferenceMatch.DIRECTORY}
+
+
+def test_only_repository_hints_set_a_match(files: ProjectFiles) -> None:
+    found = DocumentationDiscoverer(files, ["docs"]).discover(request())
+    assert found.candidates and all(c.provenance[0].match is None for c in found.candidates)
 
 
 def test_origin_ref_is_a_hint_source(files: ProjectFiles) -> None:

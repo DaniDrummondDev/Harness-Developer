@@ -13,9 +13,12 @@ memories. The same resource found by several discoverers becomes ONE candidate
 with several provenance entries (e.g. `docs/adr/0001.md` is both under a
 documentation path and an ADR path; `engineering/policies/secrets.md` is both a
 library artifact and a repository file named in the request). The candidate
-keeps the kind that comes first in `CandidateKind` (library kinds, then
-instructions, adr, doc, source, memory); the other provenance is preserved.
-Titles never participate in identity.
+keeps the kind (and id, title) that comes first in `CandidateKind` (library
+kinds, then instructions, adr, doc, source, memory); every provenance entry is
+preserved (including `match`, which carries explicit request references) and
+metadata is merged: keys from either side are kept; a key with two different
+values keeps the winner's value and records the dropped one under
+`metadata["merge_conflicts"]`. Titles never participate in identity.
 
 `build_discovery(config, library, memory=...)` is the composition step.
 Opening memory is left to the caller (CLI), which owns that decision; here
@@ -42,9 +45,11 @@ from orchestrator.context.discoverers import (
 from orchestrator.context.files import ProjectFiles
 from orchestrator.context.models import (
     KIND_ORDER,
+    MERGE_CONFLICTS_KEY,
     CandidateReference,
     ContextCandidate,
     ContextDiscoveryResult,
+    MetadataValue,
     ReferenceStore,
     SourceReport,
     SourceStatus,
@@ -55,12 +60,40 @@ from orchestrator.library.library import GlobalLibrary
 from orchestrator.library.models import ProjectProfile
 
 
+def _merge_metadata(winner: ContextCandidate, other: ContextCandidate) -> dict[str, MetadataValue]:
+    """Union of both metadata. On a key with two different values the winner's
+    value is kept and the dropped one is recorded under MERGE_CONFLICTS_KEY, so
+    nothing a later stage could need disappears silently (V1.1 debt, fixed in V1.2)."""
+    merged = dict(winner.metadata)
+    conflicts = list(_conflicts(merged))
+    for key, value in other.metadata.items():
+        if key == MERGE_CONFLICTS_KEY:
+            conflicts.extend(_conflicts(other.metadata))
+        elif key not in merged:
+            merged[key] = value
+        elif merged[key] != value:
+            conflicts.append(
+                f"{key}: kept {merged[key]!r} ({winner.kind}), dropped {value!r} "
+                f"({other.kind} via {other.provenance[0].discoverer})"
+            )
+    if conflicts:
+        merged[MERGE_CONFLICTS_KEY] = tuple(dict.fromkeys(conflicts))
+    return merged
+
+
+def _conflicts(metadata: Mapping[str, MetadataValue]) -> tuple[str, ...]:
+    value = metadata.get(MERGE_CONFLICTS_KEY, ())
+    return value if isinstance(value, tuple) else (str(value),)
+
+
 def _merge(first: ContextCandidate, second: ContextCandidate) -> ContextCandidate:
     winner, other = (first, second) if KIND_ORDER[first.kind] <= KIND_ORDER[second.kind] else (
         second, first
     )
     extra = tuple(p for p in other.provenance if p not in winner.provenance)
-    return winner.model_copy(update={"provenance": winner.provenance + extra})
+    return winner.model_copy(update={
+        "provenance": winner.provenance + extra, "metadata": _merge_metadata(winner, other),
+    })
 
 
 class ContextCandidateDiscovery:

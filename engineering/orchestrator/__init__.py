@@ -20,8 +20,13 @@ may be relevant to a request (library, instructions, ADRs, docs, repository
 hints, memory) as typed, deduplicated, provenance-carrying candidates — no
 classification, scoring or budget; `context discover` and a `context` doctor
 check.
+V1.2 (Context Classification): `orchestrator/context/classification/` gives each
+candidate exactly one of REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED with who
+decided (deterministic rule, Jev via DecisionService, or conservative OPTIONAL
+fallback) and structured evidence; `context classify` and a structural
+`classification` doctor check. No budget or prompt selection.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 HARNESS_NAME = "AI Engineering Harness"

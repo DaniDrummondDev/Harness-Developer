@@ -49,7 +49,8 @@ def test_valid_environment_passes(harness_root: Path) -> None:
     assert report.exit_code == 0
     assert set(statuses(report.results)) == {
         "python", "harness_root", "permissions", "config_files",
-        "config_valid", "structure", "context", "library", "git", "git_repository",
+        "config_valid", "structure", "context", "classification", "library", "git",
+        "git_repository",
     }
 
 

@@ -37,6 +37,12 @@ validates the configured discovery paths (FAIL if one resolves outside the
 project; absent optional paths are listed in the PASS detail). It never runs a
 discovery: that needs a request and belongs to `context discover`.
 
+`classification` (V1.2) runs with `context`: it only reports the strategy
+`context classify` will use (deterministic rules; decision model when
+`classification.probabilistic` and its provider is enabled; OPTIONAL fallback).
+WARN when probabilistic classification is requested but decisions.yaml has no
+model. It never classifies and never calls the decision provider.
+
 To add a check: write `def check_x(...) -> CheckResult`, call it from
 `run_doctor`, and add a test in tests/unit/test_doctor.py.
 """
@@ -236,6 +242,34 @@ def check_context(config: HarnessConfig) -> CheckResult:
     return CheckResult("context", CheckStatus.PASS, detail)
 
 
+def check_classification(config: HarnessConfig) -> CheckResult:
+    """Structural only: which strategy `context classify` will use. Never opens
+    the decision layer (the `decisions` check owns connectivity) and never classifies."""
+    settings = config.context.classification
+    fallback = "unresolved candidates use the conservative fallback (OPTIONAL)"
+    if not settings.probabilistic:
+        return CheckResult("classification", CheckStatus.PASS,
+                           f"deterministic rules only (probabilistic: false); {fallback}")
+    alias = config.decisions.model
+    if alias is None or config.decisions.thresholds is None:
+        return CheckResult(
+            "classification", CheckStatus.WARN,
+            f"probabilistic: true but decisions.yaml sets no model; {fallback}",
+        )
+    if not decisions_enabled(config):
+        provider = config.models[alias].provider if alias in config.models else "?"
+        return CheckResult(
+            "classification", CheckStatus.PASS,
+            f"deterministic rules; decision provider '{provider}' is disabled, so {fallback}",
+        )
+    return CheckResult(
+        "classification", CheckStatus.PASS,
+        f"deterministic rules, then decision model '{alias}' for unresolved candidates "
+        f"(minimum_confidence {config.decisions.thresholds.minimum_confidence:.2f}, "
+        f"max_decisions {settings.max_decisions}); otherwise OPTIONAL",
+    )
+
+
 def check_git_executable(runner: CommandRunner) -> tuple[CheckResult, bool]:
     try:
         result = runner(["git", "--version"], timeout=GIT_TIMEOUT_SECONDS)
@@ -331,6 +365,9 @@ def run_doctor(
         if config is not None and config.context.enabled:
             context_cfg = config
             results.append(_guarded("context", lambda: check_context(context_cfg)))
+            results.append(
+                _guarded("classification", lambda: check_classification(context_cfg))
+            )
 
     # Independent of the harness root: the library belongs to the installation.
     results.append(_guarded("library", lambda: check_library(library_root, environ)))

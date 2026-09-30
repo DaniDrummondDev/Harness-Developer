@@ -1,4 +1,4 @@
-# Architecture — as built (V1.1)
+# Architecture — as built (V1.2)
 
 Target architecture: [`../../docs/03-ARCHITECTURE-AND-FOLDER-STRUCTURE.md`](../../docs/03-ARCHITECTURE-AND-FOLDER-STRUCTURE.md).
 This file records **what exists now** and the decisions taken to get here. Modules from
@@ -9,14 +9,18 @@ the target tree are created only when a version needs them.
 | Module | Responsibility | Depends on |
 |---|---|---|
 | `orchestrator/__main__.py` | `python -m orchestrator` entry point | `cli` |
-| `orchestrator/cli.py` | Typer app: root command (identity + help), global options (`--root`, `--log-level`, `--version`), `doctor`, `intake`, **V0.3** `memory` (health/add/search/update/delete) , **V0.4** `decision` (classify/route/severity/relevance/health) , **V1** `library` (inspect/resolve) and **V1.1** `context discover` commands, rendering | `doctor`, `config`, `intake`, `core.admission`, `memory.service`, `decisions.service`, `library.*`, `context.discovery`, `utils.logging` |
+| `orchestrator/cli.py` | Typer app: root command (identity + help), global options (`--root`, `--log-level`, `--version`), `doctor`, `intake`, **V0.3** `memory` (health/add/search/update/delete) , **V0.4** `decision` (classify/route/severity/relevance/health) , **V1** `library` (inspect/resolve), **V1.1** `context discover` and **V1.2** `context classify` commands, rendering | `doctor`, `config`, `intake`, `core.admission`, `memory.service`, `decisions.service`, `library.*`, `context.discovery`, `context.classification.classifier`, `utils.logging` |
 | `orchestrator/library/models.py` | **V1** Global Library contracts: `ArtifactType`, `Authority` (fixed per type), `PRECEDENCE`, `DIRECTORY_BY_TYPE`, `AppliesTo`, `ArtifactMetadata`/`SpecialtyMetadata` (schema v1), `Artifact`, `ProjectProfile`, `Match` | — (Pydantic only) |
 | `orchestrator/library/loader.py` | **V1** `resolve_library_root` (explicit > `$HARNESS_LIBRARY_ROOT` > installation dir); discover → read → parse (front matter) → validate, with path-escape, size and file-type guards | `library.models`, `config` (`default_harness_root` only), `utils.files`, `utils.yaml_loader`, `core.exceptions` |
 | `orchestrator/library/library.py` | **V1** `GlobalLibrary`: index (duplicate ids), reference checks, `artifacts`/`by_type`/`get`, deterministic `resolve(profile)` | `library.loader`, `library.models`, `core.exceptions` |
 | `orchestrator/context/models.py` | **V1.1** `CandidateKind` (merge/output order), `ReferenceStore`, `CandidateReference`, `Provenance`, `ContextCandidate` (no classification/score fields), `SourceStatus`, `SourceReport`, `ContextDiscoveryResult`, `UNSUPPORTED_SOURCES` | `core.request` |
 | `orchestrator/context/files.py` | **V1.1** `ProjectFiles`: configured-path containment (fatal), bounded sorted walks (pruning, no symlinked dirs, secret names, size limit), 8 KiB Markdown head for titles | `core.exceptions` |
 | `orchestrator/context/discoverers.py` | **V1.1** `LibraryDiscoverer`, `InstructionsDiscoverer`, `AdrDiscoverer`, `DocumentationDiscoverer`, `RepositoryHintsDiscoverer` (+ `extract_hints`), `MemoryDiscoverer` (via `MemorySearcher` protocol), `UnconsultedSource` | `context.files/models`, `library`, `memory.models`, `core` |
-| `orchestrator/context/discovery.py` | **V1.1** `ContextCandidateDiscovery` (run, merge by canonical resource, sort), `build_discovery(config, library, memory=...)`, `check_discovery_paths` | `config`, `context.*`, `library`, `core` |
+| `orchestrator/context/discovery.py` | **V1.1** `ContextCandidateDiscovery` (run, merge by canonical resource, sort), `build_discovery(config, library, memory=...)`, `check_discovery_paths`; **V1.2** metadata-preserving merge (`merge_conflicts`) | `config`, `context.*`, `library`, `core` |
+| `orchestrator/context/classification/models.py` | **V1.2** `ContextClass`, `SelectedBy`, `Evidence`, `ContextClassification` (+ invariants), `ClassifiedContextCandidate`, `ContextClassificationResult` (ordered, counts) | `context.models`, `core.request` |
+| `orchestrator/context/classification/deterministic.py` | **V1.2** `ClassificationRule`, `DEFAULT_RULES` (ordered, first match wins), `DeterministicClassifier` | `classification.models`, `context.models`, `library.models` (`Authority`) |
+| `orchestrator/context/classification/probabilistic.py` | **V1.2** `Decider` protocol, `decision_subject` (minimal safe input), `ProbabilisticClassifier` (outcome → class/fallback, per-run stop on provider failure, `max_decisions`) | `classification.models`, `decisions.models`, `providers.base`, `memory.safety` |
+| `orchestrator/context/classification/classifier.py` | **V1.2** `ContextClassifier` (deterministic → decider → fallback), `build_classifier(config, decider=...)` | `config`, `classification.*`, `context.models` |
 | `orchestrator/utils/yaml_loader.py` | **V1** (extracted from `config.py`) safe YAML parsing that rejects duplicate keys; shared by config and library | — (PyYAML only) |
 | `orchestrator/doctor.py` | Deterministic checks, aggregation (worst status wins), exit code; **V0.3** opt-in `memory` check; **V0.4** opt-in `decisions` check | `config`, `utils.shell`, `memory.service`, `decisions.service` |
 | `orchestrator/config.py` | Harness-root resolution, YAML parsing, Pydantic schemas, cross-file checks, `HarnessConfig` (incl. `enabled_modes`) | `utils.files`, `core.exceptions`, `core.request` |
@@ -54,9 +58,12 @@ requests or YAML parsing. Since V0.4 the CLI and `doctor` reach providers only t
 CLI, providers, memory, decisions, network or subprocesses; `core/` does not import it and
 only `cli.py`/`doctor.py` and, since V1.1, `context/` consume it (guarded by
 `tests/unit/test_library_isolation.py`). `context/` (V1.1) never imports CLI, doctor,
-providers, decisions (no Jev), the memory service/adapters, network or subprocesses; it
+providers, decisions, the memory service/adapters, network or subprocesses; it
 searches memory only through the `MemorySearcher` protocol, so opening memory stays with
-`cli.py`/`doctor.py` (guarded by `tests/unit/test_context_discovery.py`).
+`cli.py`/`doctor.py` (guarded by `tests/unit/test_context_discovery.py`). V1.2: only
+`context/classification/probabilistic.py` imports the decision layer's *contracts*
+(`decisions.models`, `providers.base`) and reaches Jev through the `Decider` protocol;
+`open_decisions` stays in `cli.py` (same guard).
 
 ## Main flows
 
@@ -78,6 +85,7 @@ resolve_harness_root(--root | $HARNESS_ROOT | package dir)   -> HarnessPathError
 ```text
 python → harness_root → [permissions, config_files, config_valid, structure, memory*, decisions**, context****] → library*** → git → [git_repository]
 **** context (V1.1): only when context.enabled — validates discovery paths (escape = FAIL), never discovers
+     + classification (V1.2): structural strategy report; WARN if probabilistic without decisions.model; no call
                          (only if root found)                                                                          (only if git + config ok)
 *** library (V1): always, offline, independent of the harness root — load errors FAIL, empty library WARN
 * memory: only when memory.yaml has enabled: true — healthy PASS, unavailable WARN, misconfigured FAIL
@@ -235,7 +243,33 @@ harness context discover "<instruction>" [--intent] [--ref]
   sort (kind order, id) → ContextDiscoveryResult(request, candidates, sources, unsupported)
 ```
 
-No classification, score, budget, content loading, LLM or Jev (V1.2+).
+No classification, score, budget, content loading, LLM or Jev in discovery.
+
+**Context Classification (V1.2)**
+
+```text
+harness context classify "<instruction>" [--intent] [--ref]
+  (same discovery as above) → ContextDiscoveryResult
+  classification.probabilistic ? open_decisions(config) (failure → reason, not an error) : none
+  build_classifier(config, decider=…) → ContextClassifier.classify(discovery)
+    each candidate → DeterministicClassifier: DEFAULT_RULES in order, first match decides,
+                     other matches → also_matched; memory never REQUIRED
+    unresolved only:
+      decider available → ProbabilisticClassifier, per candidate:
+        provider stopped earlier ───────────> FALLBACK decision_unavailable
+        calls ≥ max_decisions ──────────────> FALLBACK decision_limit_reached (+ warning)
+        subject blocked by memory.safety ───> FALLBACK unsafe_decision_input (+ warning)
+        DecisionService.decide(CONTEXT_RELEVANCE, options EXCLUDED<OPTIONAL<HIGH_VALUE, ordered)
+          DECIDED ────────────────────────> PROBABILISTIC class, confidence, relevance=score
+          low_confidence ─────────────────> FALLBACK + suggestion (not applied)
+          invalid_response ───────────────> FALLBACK + warning (run continues)
+          unavailable/timeout/raised error > FALLBACK + warning; provider stopped for the run
+      no decider → FALLBACK no_decision_layer (+ one warning with the reason)
+  ContextClassificationResult.build: every candidate (EXCLUDED kept), order (class, kind, id),
+    counts, decisions (by selected_by), warnings (discovery + classification)
+```
+
+No budget, truncation, prompt selection or LLM (V1.3+).
 
 ## Decisions (V0)
 
@@ -377,6 +411,26 @@ Rationale and alternatives: [`sprints/sprint-v1.1.md`](sprints/sprint-v1.1.md).
 8. **Memory through a protocol** (`MemorySearcher`), project scope, read-only, opt-in.
 9. **`context.enabled` now gates discovery** (shipped `true`).
 
+## Decisions (V1.2)
+
+Rationale and alternatives: [`sprints/sprint-v1.2.md`](sprints/sprint-v1.2.md).
+
+1. **Composition, not mutation**: `ClassifiedContextCandidate(candidate, classification)`.
+2. **Deterministic first by construction**: resolved candidates never reach the decider.
+3. **Ordered rule table, first match wins**; rule id = `Evidence` value (stable).
+   Negative structural state (`superseded_adr`, `generated_artifact`) precedes explicit
+   references: a named superseded ADR or generated file stays EXCLUDED, with the reference
+   in `also_matched`.
+4. **Jev cannot answer REQUIRED** (options EXCLUDED/OPTIONAL/HIGH_VALUE, ordered →
+   `relevance` score); REQUIRED needs objective evidence.
+5. **Threshold reused** from decisions.yaml (`minimum_confidence`), not duplicated.
+6. **Conservative fallback = OPTIONAL**, always with structured evidence; failures are
+   warnings, and an unavailable provider is not called again in the run.
+7. **One decision per candidate** (no batch contract), bounded by `max_decisions`.
+8. **No reasoning-LLM fallback**: no LLM runtime exists (V2.x); not simulated.
+9. **Dedup keeps all metadata** (conflicts recorded) and `Provenance.match` makes
+   explicit references structured.
+
 ## Where to change things
 
 - New CLI command → `cli.py` (`@app.command()`), logic in its own module.
@@ -427,3 +481,10 @@ Rationale and alternatives: [`sprints/sprint-v1.1.md`](sprints/sprint-v1.1.md).
 - Discovery roots/limits → `config/context.yaml`; a new option → `DiscoverySection` + its
   consumer. Built-in excluded dirs / secret names → `context/files.py`.
 - Hint extraction rules → `extract_hints` in `context/discoverers.py` (+ parametrized tests).
+- New classification rule → `Evidence` member (`classification/models.py`, add it to
+  `DETERMINISTIC_EVIDENCE`), a `ClassificationRule` at its precedence position in
+  `DEFAULT_RULES` (`classification/deterministic.py`) + tests in
+  `test_context_classification_rules.py`.
+- Jev question/rubric/input allowlist → `QUESTION`, `DESCRIPTIONS`, `SAFE_METADATA` in
+  `classification/probabilistic.py`. Fallback class → `FALLBACK_CLASS` (models.py).
+- Classification options → `ClassificationSection` in `config.py` + `config/context.yaml`.
