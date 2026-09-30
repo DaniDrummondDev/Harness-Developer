@@ -1,4 +1,4 @@
-# Architecture — as built (V0.4)
+# Architecture — as built (V1)
 
 Target architecture: [`../../docs/03-ARCHITECTURE-AND-FOLDER-STRUCTURE.md`](../../docs/03-ARCHITECTURE-AND-FOLDER-STRUCTURE.md).
 This file records **what exists now** and the decisions taken to get here. Modules from
@@ -9,7 +9,11 @@ the target tree are created only when a version needs them.
 | Module | Responsibility | Depends on |
 |---|---|---|
 | `orchestrator/__main__.py` | `python -m orchestrator` entry point | `cli` |
-| `orchestrator/cli.py` | Typer app: root command (identity + help), global options (`--root`, `--log-level`, `--version`), `doctor`, `intake`, **V0.3** `memory` (health/add/search/update/delete) and **V0.4** `decision` (classify/route/severity/relevance/health) commands, rendering | `doctor`, `config`, `intake`, `core.admission`, `memory.service`, `decisions.service`, `utils.logging` |
+| `orchestrator/cli.py` | Typer app: root command (identity + help), global options (`--root`, `--log-level`, `--version`), `doctor`, `intake`, **V0.3** `memory` (health/add/search/update/delete) , **V0.4** `decision` (classify/route/severity/relevance/health) and **V1** `library` (inspect/resolve) commands, rendering | `doctor`, `config`, `intake`, `core.admission`, `memory.service`, `decisions.service`, `library.*`, `utils.logging` |
+| `orchestrator/library/models.py` | **V1** Global Library contracts: `ArtifactType`, `Authority` (fixed per type), `PRECEDENCE`, `DIRECTORY_BY_TYPE`, `AppliesTo`, `ArtifactMetadata`/`SpecialtyMetadata` (schema v1), `Artifact`, `ProjectProfile`, `Match` | — (Pydantic only) |
+| `orchestrator/library/loader.py` | **V1** `resolve_library_root` (explicit > `$HARNESS_LIBRARY_ROOT` > installation dir); discover → read → parse (front matter) → validate, with path-escape, size and file-type guards | `library.models`, `config` (`default_harness_root` only), `utils.files`, `utils.yaml_loader`, `core.exceptions` |
+| `orchestrator/library/library.py` | **V1** `GlobalLibrary`: index (duplicate ids), reference checks, `artifacts`/`by_type`/`get`, deterministic `resolve(profile)` | `library.loader`, `library.models`, `core.exceptions` |
+| `orchestrator/utils/yaml_loader.py` | **V1** (extracted from `config.py`) safe YAML parsing that rejects duplicate keys; shared by config and library | — (PyYAML only) |
 | `orchestrator/doctor.py` | Deterministic checks, aggregation (worst status wins), exit code; **V0.3** opt-in `memory` check; **V0.4** opt-in `decisions` check | `config`, `utils.shell`, `memory.service`, `decisions.service` |
 | `orchestrator/config.py` | Harness-root resolution, YAML parsing, Pydantic schemas, cross-file checks, `HarnessConfig` (incl. `enabled_modes`) | `utils.files`, `core.exceptions`, `core.request` |
 | `orchestrator/intake.py` | **V0.1** Normalization: raw strings from any origin → `EngineeringRequest` | `core.request`, `core.exceptions` |
@@ -42,7 +46,9 @@ requests or YAML parsing. Since V0.4 the CLI and `doctor` reach providers only t
 (guarded by `tests/unit/test_decision_config.py`), and `decisions/` never imports an LLM.
 `memory/` knows nothing about CLI, intake, requests or inference providers; only
 `memory/service.py` imports the Mem0 adapter, and only `cli.py`/`doctor.py` open memory
-(guarded by `tests/unit/test_memory_isolation.py`).
+(guarded by `tests/unit/test_memory_isolation.py`). `library/` (V1) knows nothing about
+CLI, providers, memory, decisions, network or subprocesses; `core/` does not import it and
+only `cli.py`/`doctor.py` consume it (guarded by `tests/unit/test_library_isolation.py`).
 
 ## Main flows
 
@@ -62,8 +68,9 @@ resolve_harness_root(--root | $HARNESS_ROOT | package dir)   -> HarnessPathError
 **Doctor**
 
 ```text
-python → harness_root → [permissions, config_files, config_valid, structure, memory*, decisions**] → git → [git_repository]
-                         (only if root found)                                                             (only if git + config ok)
+python → harness_root → [permissions, config_files, config_valid, structure, memory*, decisions**] → library*** → git → [git_repository]
+                         (only if root found)                                                                          (only if git + config ok)
+*** library (V1): always, offline, independent of the harness root — load errors FAIL, empty library WARN
 * memory: only when memory.yaml has enabled: true — healthy PASS, unavailable WARN, misconfigured FAIL
 ** decisions: only when the decisions.model's provider is enabled — GET /v1/models (no inference):
    healthy PASS, unavailable WARN, missing/rejected key FAIL
@@ -168,6 +175,31 @@ DecisionService.decide(question, options, kind, subject, ordered, descriptions)
 
 The fallback is a value, never an action: nothing calls an LLM or a human in V0.4.
 
+**Global Library (V1)**
+
+```text
+resolve_library_root(explicit | $HARNESS_LIBRARY_ROOT | installation dir)   -> LibraryStructureError
+  (never --root / $HARNESS_ROOT: consumers share the installation's library)
+GlobalLibrary.load(root)
+  └─ for type in policy, guideline, rule, skill, specialty:           (fixed order)
+       <root>/<type dir>/ must exist (may be empty), resolve inside root   -> LibraryStructureError
+       for entry in sorted(dir): skip dotfiles; must be a regular *.md
+         resolving inside its type dir (no symlink escape)                 -> LibraryStructureError
+         size ≤ 256 KiB, UTF-8                                             -> ArtifactParseError
+         '---' YAML front matter '---' (safe loader, no duplicate keys)    -> ArtifactParseError
+         version == 1; type valid and == directory type                    -> ArtifactValidationError
+         ArtifactMetadata / SpecialtyMetadata (extra keys forbidden)       -> ArtifactValidationError
+         non-empty body (inert text)                                       -> ArtifactValidationError
+  └─ index by (type, id): duplicates                                       -> ArtifactValidationError
+  └─ specialty skills/rules references exist with that type                -> ArtifactValidationError
+library.resolve(ProjectProfile(stack, capabilities))   # from project.yaml
+  applies_to.always → "always"; stacks ∩ profile.stack → "stack:<x>"; capabilities ∩ … → "capability:<x>"
+  → Match(artifact, reasons), ordered by authority (mandatory > recommended > knowledge), type, id
+```
+
+`harness library inspect [--type]` and `harness library resolve [--stack …] [--capability …]`
+print these as JSON. Nothing selects, ranks or budgets knowledge for a prompt yet (V1.1+).
+
 ## Decisions (V0)
 
 1. **`engineering/` is the portable harness root.** It holds the package, `config/`,
@@ -271,6 +303,24 @@ Rationale and alternatives: [`sprints/sprint-v0.4.md`](sprints/sprint-v0.4.md).
 9. **No retries in the adapter.** One call, one outcome; retry policy belongs to V5.
 10. **Jev disabled by default**; `doctor` checks it only when enabled, without inference.
 
+## Decisions (V1)
+
+Rationale and alternatives: [`sprints/sprint-v1.md`](sprints/sprint-v1.md).
+
+1. **The library belongs to the installation, not to the project.** Its root is resolved
+   independently of `--root`/`$HARNESS_ROOT`; a consumer project declares only its profile.
+2. **Target-tree layout**: `policies/ guidelines/ rules/ skills/ specialties/` directly
+   under `engineering/` (`rules/` added); one flat directory per type.
+3. **Markdown + YAML front matter**, schema `version: 1`, unknown keys rejected.
+4. **Authority is derived from the type**, never declared: policy = mandatory, guideline
+   and rule = recommended, skill and specialty = knowledge. It orders resolved output.
+5. **Ids are unique per type**; the library-wide identity is `<type>/<id>`.
+6. **Applicability is explicit**: `always: true` xor `stacks`/`capabilities`.
+7. **Resolution = exact matching** against `project.yaml` `stack` + new optional
+   `capabilities`; no aliases, no Jev, no LLM.
+8. **Specialty references are validated, not expanded** by resolution.
+9. **Fail fast, stable order**: the first error in (type, filename) order stops the load.
+
 ## Where to change things
 
 - New CLI command → `cli.py` (`@app.command()`), logic in its own module.
@@ -306,3 +356,11 @@ Rationale and alternatives: [`sprints/sprint-v0.4.md`](sprints/sprint-v0.4.md).
   `DecisionThresholds` in `config.py` + its consumer (V5.2 policy engine).
 - New decision kind → `DecisionKind` in `providers/base.py` (additive) + CLI preset if needed.
 - Pin the Jev version → `config/models.yaml` `model_id` (e.g. `jev-1.13.0`).
+- New library artifact → one `.md` file in the type directory (`skills/`, ...); run
+  `harness library inspect` / `doctor`. No code change.
+- New artifact metadata field → `ArtifactMetadata` (or a type-specific subclass) in
+  `library/models.py` + a consumer + tests; removing/renaming a field needs schema `version: 2`.
+- New artifact type → `ArtifactType`, `AUTHORITY_BY_TYPE`, `DIRECTORY_BY_TYPE` (and
+  `METADATA_MODEL_BY_TYPE` if it has its own fields) + the directory.
+- New matching criterion → `AppliesTo` (field + `reasons`) and, if the project declares
+  it, `ProjectSection` in `config.py` and `ProjectProfile`.

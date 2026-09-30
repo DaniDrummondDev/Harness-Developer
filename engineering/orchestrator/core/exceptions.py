@@ -29,12 +29,18 @@ from bugs (traceback).
     │       ├── DecisionInvalidResponseError malformed/out-of-contract answer (V0.4; fallback)
     │       └── DecisionUnavailableError     unreachable, overloaded, 5xx (V0.4; fallback)
     │           └── DecisionTimeoutError     no answer within the timeout (V0.4; fallback)
-    └── MemoryStoreError              memory backend failure / unexpected backend response (V0.3)
-        ├── InvalidMemoryInputError   malformed scope, source, content or query (no backend call)
-        ├── UnsafeMemoryContentError  safe ingestion policy blocked the content (nothing stored)
-        ├── MemoryNotFoundError       no stored memory has this id (includes malformed ids)
-        ├── MemoryConfigurationError  memory disabled/misconfigured or credentials rejected
-        └── MemoryUnavailableError    backend unreachable, timed out or failing (5xx)
+    ├── MemoryStoreError              memory backend failure / unexpected backend response (V0.3)
+    │   ├── InvalidMemoryInputError   malformed scope, source, content or query (no backend call)
+    │   ├── UnsafeMemoryContentError  safe ingestion policy blocked the content (nothing stored)
+    │   ├── MemoryNotFoundError       no stored memory has this id (includes malformed ids)
+    │   ├── MemoryConfigurationError  memory disabled/misconfigured or credentials rejected
+    │   └── MemoryUnavailableError    backend unreachable, timed out or failing (5xx)
+    └── LibraryError                  Global Library failure (V1); carries the offending path
+        ├── LibraryStructureError     root/type directory missing, unexpected entry, path escape
+        ├── ArtifactParseError        unreadable file, missing front matter, invalid YAML
+        ├── ArtifactValidationError   schema/version/type/directory mismatch, duplicate id,
+        │                             unknown reference
+        └── ArtifactNotFoundError     no artifact of that type has this id
 
 Names intentionally avoid shadowing builtins (`EnvironmentError`) and
 Pydantic (`ValidationError`).
@@ -199,3 +205,30 @@ class MemoryConfigurationError(MemoryStoreError):
 
 class MemoryUnavailableError(MemoryStoreError):
     """The memory backend is unreachable, timed out or failed internally."""
+
+
+class LibraryError(HarnessError):
+    """Base class for Global Library failures (V1). Library artifacts are trusted,
+    versioned files, but they are still validated and a bad one fails the load."""
+
+    def __init__(self, message: str, *, path: Path | None = None) -> None:
+        self.path = path
+        super().__init__(f"{path}: {message}" if path else message)
+
+
+class LibraryStructureError(LibraryError):
+    """The library layout is wrong: missing root or type directory, an unexpected
+    entry, or a path that resolves outside the library root."""
+
+
+class ArtifactParseError(LibraryError):
+    """An artifact file is unreadable, too large, lacks front matter or has invalid YAML."""
+
+
+class ArtifactValidationError(LibraryError):
+    """An artifact parsed but violates the schema or a library invariant (type vs
+    directory, duplicate id, unknown reference)."""
+
+
+class ArtifactNotFoundError(LibraryError):
+    """No artifact of the requested type has the requested id."""

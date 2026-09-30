@@ -5,5 +5,10 @@ project:
   description: AI Engineering Harness developed with its own foundation.
   # Target project root, relative to the harness root (this `engineering/` folder).
   root: ..
+  # Project profile (V1): the Harness matches it against the Global Library
+  # (`harness library resolve`) so the project inherits applicable knowledge
+  # without copying it. `stack` = technologies; `capabilities` = what the
+  # project has or does (e.g. api, database, containers). Exact, lowercase ids.
   stack:
     - python
+  capabilities: []

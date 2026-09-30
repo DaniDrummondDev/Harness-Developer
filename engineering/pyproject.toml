@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ai-engineering-harness"
 dynamic = ["version"]
-description = "AI Engineering Harness — engineering control plane (V0.4: decision foundation)."
+description = "AI Engineering Harness — engineering control plane (V1: global library)."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

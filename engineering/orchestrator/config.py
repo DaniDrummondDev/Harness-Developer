@@ -41,6 +41,7 @@ from orchestrator.core.exceptions import (
 )
 from orchestrator.core.request import ExecutionMode
 from orchestrator.utils.files import read_text, require_directory, resolve_path
+from orchestrator.utils.yaml_loader import load_yaml
 
 HARNESS_ROOT_ENV = "HARNESS_ROOT"
 CONFIG_DIRNAME = "config"
@@ -68,7 +69,11 @@ class ProjectSection(_StrictModel):
     name: NonEmptyStr
     description: str = ""
     root: NonEmptyStr = Field(description="Target project root, relative to the harness root.")
+    # Project profile (V1): matched deterministically against the Global Library's
+    # `applies_to` (orchestrator/library). `stack` = technologies in use;
+    # `capabilities` = what the project does/has (api, database, containers, ...).
     stack: list[Identifier] = Field(default_factory=list)
+    capabilities: list[Identifier] = Field(default_factory=list)
 
 
 class ProjectFile(_VersionedFile):
@@ -314,27 +319,6 @@ def missing_config_files(harness_root: Path) -> list[str]:
 # --- parsing ----------------------------------------------------------------
 
 
-class _UniqueKeyLoader(yaml.SafeLoader):
-    """SafeLoader that rejects duplicate mapping keys instead of silently overriding."""
-
-
-def _construct_unique_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode) -> dict[Any, Any]:
-    seen: set[Any] = set()
-    for key_node, _ in node.value:
-        key = loader.construct_object(key_node)
-        if key in seen:
-            raise yaml.constructor.ConstructorError(
-                None, None, f"duplicate key '{key}'", key_node.start_mark
-            )
-        seen.add(key)
-    return loader.construct_mapping(node)
-
-
-_UniqueKeyLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping
-)
-
-
 def _parse_yaml(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise ConfigFileNotFoundError("required configuration file is missing", path=path)
@@ -343,7 +327,7 @@ def _parse_yaml(path: Path) -> dict[str, Any]:
     except HarnessPathError as exc:
         raise ConfigParseError(str(exc), path=path) from exc
     try:
-        data = yaml.load(text, Loader=_UniqueKeyLoader)  # noqa: S506 - SafeLoader subclass
+        data = load_yaml(text)
     except yaml.YAMLError as exc:
         raise ConfigParseError(f"invalid YAML: {exc}", path=path) from exc
     if data is None:

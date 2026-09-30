@@ -41,6 +41,15 @@ def harness_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def library_root(tmp_path: Path) -> Path:
+    """An empty but well-formed Global Library (all five type directories)."""
+    root = tmp_path / "library"
+    for name in ("policies", "guidelines", "rules", "skills", "specialties"):
+        (root / name).mkdir(parents=True)
+    return root
+
+
+@pytest.fixture
 def write_config(harness_root: Path) -> Callable[[str, str], Path]:
     """Overwrite `config/<name>` with dedented `content`."""
 

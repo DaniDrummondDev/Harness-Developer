@@ -195,6 +195,28 @@ def test_invalid_values_fail_validation(
     assert excinfo.value.path == harness_root / "config" / filename
 
 
+def test_project_profile_fields(harness_root: Path, write_config: WriteConfig) -> None:
+    # V1: `capabilities` is optional, so V0.x project.yaml files stay valid.
+    write_config("project.yaml", """
+        version: 1
+        project: {name: p, root: .., stack: [php]}
+    """)
+    assert load_config(harness_root).project.capabilities == []
+
+    write_config("project.yaml", """
+        version: 1
+        project: {name: p, root: .., stack: [php, laravel], capabilities: [api, database]}
+    """)
+    assert load_config(harness_root).project.capabilities == ["api", "database"]
+
+    write_config("project.yaml", """
+        version: 1
+        project: {name: p, root: .., capabilities: [Web API]}
+    """)
+    with pytest.raises(ConfigValidationError, match="capabilities"):
+        load_config(harness_root)
+
+
 def test_modes_are_typed_and_enabled_modes_reflect_config(
     harness_root: Path, write_config: WriteConfig
 ) -> None:

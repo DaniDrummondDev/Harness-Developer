@@ -27,6 +27,11 @@ network services are deliberately NOT checked here, with two opt-in exceptions:
   HEALTHY -> PASS, UNAVAILABLE -> WARN, rejected/missing API key -> FAIL.
   With the provider disabled (the shipped default) no network call is made.
 
+`library` (V1) always runs and is offline: it loads the Global Library (root
+from $HARNESS_LIBRARY_ROOT or the installation directory, independent of the
+harness root) and FAILs on any structure, parse, schema, duplicate-id or
+reference error. An empty but well-formed library is a WARN.
+
 To add a check: write `def check_x(...) -> CheckResult`, call it from
 `run_doctor`, and add a test in tests/unit/test_doctor.py.
 """
@@ -51,6 +56,9 @@ from orchestrator.config import (
 from orchestrator.core.exceptions import CommandError, HarnessError
 from orchestrator.decisions.models import HealthStatus as DecisionHealthStatus
 from orchestrator.decisions.service import DecisionService, open_decisions
+from orchestrator.library.library import GlobalLibrary
+from orchestrator.library.loader import resolve_library_root
+from orchestrator.library.models import ArtifactType
 from orchestrator.memory.models import HealthStatus
 from orchestrator.memory.service import MemoryService, open_memory
 from orchestrator.utils.shell import CommandResult, run_command
@@ -198,6 +206,19 @@ def check_structure(root: Path) -> CheckResult:
     return CheckResult("structure", CheckStatus.PASS, "expected directories present")
 
 
+def check_library(library_root: Path | None, environ: Mapping[str, str] | None) -> CheckResult:
+    try:
+        library = GlobalLibrary.load(resolve_library_root(library_root, environ))
+    except HarnessError as exc:
+        return CheckResult("library", CheckStatus.FAIL, str(exc))
+    total = len(library.artifacts())
+    if total == 0:
+        return CheckResult("library", CheckStatus.WARN, f"no artifacts in {library.root}")
+    counts = ", ".join(f"{len(library.by_type(t))} {t}" for t in ArtifactType)
+    detail = f"{total} artifacts at {library.root} ({counts})"
+    return CheckResult("library", CheckStatus.PASS, detail)
+
+
 def check_git_executable(runner: CommandRunner) -> tuple[CheckResult, bool]:
     try:
         result = runner(["git", "--version"], timeout=GIT_TIMEOUT_SECONDS)
@@ -257,8 +278,9 @@ def run_doctor(
     python_version: tuple[int, int, int] | None = None,
     memory_opener: MemoryOpener = open_memory,
     decision_opener: DecisionOpener | None = None,
+    library_root: Path | None = None,
 ) -> DoctorReport:
-    """Run all V0 checks. Dependencies are injectable for tests."""
+    """Run all checks. Dependencies are injectable for tests."""
     version = python_version or (
         sys.version_info.major,
         sys.version_info.minor,
@@ -289,6 +311,9 @@ def run_doctor(
                 lambda cfg: open_decisions(cfg, environ)
             )
             results.append(_guarded("decisions", lambda: check_decisions(loaded_cfg, opener)))
+
+    # Independent of the harness root: the library belongs to the installation.
+    results.append(_guarded("library", lambda: check_library(library_root, environ)))
 
     git_result, git_available = check_git_executable(runner)
     results.append(git_result)

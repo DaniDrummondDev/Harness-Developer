@@ -11,8 +11,12 @@ scopes, lineage, safe ingestion policy and the `memory` CLI group.
 V0.4 (Decision Foundation): Jev (TypeSafe) DecisionProvider adapter, typed
 decisions (choice/score/probability/confidence), configurable thresholds,
 fallback contract, decision telemetry and the `decision` CLI group.
+V1 (Global Library): versioned skills, guidelines, policies, rules and
+specialties owned by the installation; typed loading/validation, deterministic
+resolution against the project profile, the `library` CLI group and a
+`library` doctor check.
 """
 
-__version__ = "0.4.0"
+__version__ = "1.0.0"
 
 HARNESS_NAME = "AI Engineering Harness"

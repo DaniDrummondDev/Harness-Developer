@@ -16,11 +16,15 @@ Output conventions:
   response), 1 on a Harness error (not configured, disabled, missing/rejected key);
   `decision health` exits 1 unless the provider is healthy. Decision telemetry is
   logged as JSON at INFO (`--log-level INFO`), on stderr;
+- `library inspect|resolve` (V1): JSON on stdout, exit 0; an invalid library or
+  config -> `error: ...` on stderr, exit 1; unknown --type or malformed
+  --stack/--capability -> usage error, exit 2;
 - usage errors (unknown command/option, bad --log-level) -> Typer/Click, exit 2.
 
 Commands: root (identity + help), `doctor` (V0), `intake` (V0.1), the
-`memory` group (V0.3: health, add, search, update, delete) and the `decision`
-group (V0.4: classify, route, severity, relevance, health). New
+`memory` group (V0.3: health, add, search, update, delete), the `decision`
+group (V0.4: classify, route, severity, relevance, health) and the `library`
+group (V1: inspect, resolve). New
 commands are added as `@app.command()` functions here, delegating logic to
 their own module.
 """
@@ -33,6 +37,7 @@ from pathlib import Path
 from typing import Annotated, NoReturn
 
 import typer
+from pydantic import ValidationError as PydanticValidationError
 from rich.console import Console
 from rich.table import Table
 
@@ -44,6 +49,9 @@ from orchestrator.core.request import Intent, RequestSource
 from orchestrator.decisions.service import open_decisions
 from orchestrator.doctor import CheckStatus, DoctorReport, run_doctor
 from orchestrator.intake import normalize_request
+from orchestrator.library.library import GlobalLibrary
+from orchestrator.library.loader import resolve_library_root
+from orchestrator.library.models import ArtifactType, ProjectProfile
 from orchestrator.memory.service import MemoryService, open_memory
 from orchestrator.providers.base import DecisionKind
 from orchestrator.utils.logging import LEVELS, configure_logging
@@ -98,7 +106,7 @@ def root_command(
         ),
     ] = False,
 ) -> None:
-    """AI Engineering Harness — engineering control plane (V0.4 decision foundation)."""
+    """AI Engineering Harness — engineering control plane (V1 global library)."""
     try:
         configure_logging(log_level)
     except ValueError as exc:
@@ -404,6 +412,83 @@ def decision_health(ctx: typer.Context) -> None:
         _fail(exc)
     _echo_json(health.model_dump(mode="json"))
     raise typer.Exit(code=0 if health.ok else 1)
+
+
+# --- library (V1) --------------------------------------------------------------------
+
+library_app = typer.Typer(
+    help="Global Library: skills, guidelines, policies, rules and specialties owned by the "
+    "Harness installation and inherited by every project. Read-only, offline, deterministic.",
+    no_args_is_help=True,
+    rich_markup_mode=None,
+)
+app.add_typer(library_app, name="library")
+
+
+def _load_library() -> GlobalLibrary:
+    return GlobalLibrary.load(resolve_library_root())
+
+
+@library_app.command("inspect")
+def library_inspect(
+    type_: Annotated[
+        str | None,
+        typer.Option("--type", help=f"Only one artifact type: {', '.join(ArtifactType)}."),
+    ] = None,
+) -> None:
+    """List validated artifacts (metadata only) as JSON, policies first."""
+    try:
+        artifact_type = ArtifactType(type_) if type_ is not None else None
+    except ValueError as exc:
+        raise typer.BadParameter(f"unknown type '{type_}'", param_hint="--type") from exc
+    try:
+        library = _load_library()
+    except HarnessError as exc:
+        _fail(exc)
+    artifacts = library.artifacts() if artifact_type is None else library.by_type(artifact_type)
+    _echo_json({"root": str(library.root), "artifacts": [a.summary() for a in artifacts]})
+
+
+@library_app.command("resolve")
+def library_resolve(
+    ctx: typer.Context,
+    stack: Annotated[
+        list[str] | None,
+        typer.Option("--stack", help="A stack entry (repeat). Replaces project.yaml's profile."),
+    ] = None,
+    capability: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--capability", help="A capability (repeat). Replaces project.yaml's profile."
+        ),
+    ] = None,
+) -> None:
+    """Show the artifacts that apply to the project profile, with the reason for each.
+
+    Without --stack/--capability the profile comes from project.yaml (under --root).
+    """
+    state: CliState = ctx.find_root().obj
+    try:
+        if stack or capability:
+            profile = ProjectProfile(stack=tuple(stack or ()), capabilities=tuple(capability or ()))
+        else:
+            project = load_config(resolve_harness_root(state.root)).project
+            profile = ProjectProfile(
+                stack=tuple(project.stack), capabilities=tuple(project.capabilities)
+            )
+    except PydanticValidationError as exc:
+        raise typer.BadParameter("stack/capability entries must match ^[a-z][a-z0-9_-]*$") from exc
+    except HarnessError as exc:
+        _fail(exc)
+    try:
+        library = _load_library()
+    except HarnessError as exc:
+        _fail(exc)
+    _echo_json({
+        "root": str(library.root),
+        "profile": profile.model_dump(mode="json"),
+        "matches": [m.summary() for m in library.resolve(profile)],
+    })
 
 
 def main() -> None:

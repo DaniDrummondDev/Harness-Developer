@@ -2,7 +2,7 @@
 
 ## 1. Objetivo
 
-Este documento descreve a arquitetura atual e a estrutura de pastas do AI Engineering Harness após a conclusão do **V0.4 — Decision Foundation** (sobre o V0.3 — Memory Foundation).
+Este documento descreve a arquitetura atual e a estrutura de pastas do AI Engineering Harness após a conclusão do **V1 — Global Library** (sobre o V0.4 — Decision Foundation).
 
 Ele possui dois objetivos complementares:
 
@@ -94,9 +94,10 @@ V0.1 — Mode Foundation          COMPLETE
 V0.2 — Provider Abstraction     COMPLETE
 V0.3 — Memory Foundation        COMPLETE
 V0.4 — Decision Foundation      COMPLETE
+V1   — Global Library           COMPLETE
 ```
 
-Próxima versão: **V1 — Global Library** (não implementada).
+Próxima versão: **V1.1 — Context Candidate Discovery** (não implementada).
 
 O projeto possui agora:
 
@@ -124,6 +125,14 @@ O projeto possui agora:
 - fallback contract (`DecisionOutcome`: `decided` | `fallback_required` + motivo), apenas sinalizado;
 - telemetria mínima de decisão (`DecisionTelemetry`, log JSON estruturado);
 - comandos `decision` (classify/route/severity/relevance/health) e check opcional de decisões no `doctor`;
+- Global Library (V1): skills, guidelines, policies, rules e specialties versionados
+  (Markdown + front matter YAML, schema `version: 1`), pertencentes à instalação do Harness
+  e herdados — não copiados — pelos projetos consumidores;
+- `GlobalLibrary` (load → parse → validate → index → resolve), `Authority` fixa por tipo
+  (policy = mandatory > guideline/rule = recommended > skill/specialty = knowledge);
+- resolução determinística contra o perfil do projeto (`project.yaml` → `stack` e o novo
+  campo opcional `capabilities`), com motivo por item;
+- comandos `library` (inspect/resolve) e check offline `library` no `doctor`;
 - contract tests;
 - testes unitários e de integração (incluindo prova real opt-in contra Mem0 e contra Jev);
 - quality gates locais com pytest, Ruff e Mypy.
@@ -136,7 +145,9 @@ Ainda não estão implementados:
 - Decision Policy Engine (deterministic → Jev → LLM → human; V5);
 - fallback automático para LLM ou humano;
 - ingestão automática de memória;
-- Context Engine (inclusive uso de memória na seleção de contexto);
+- Context Engine (candidate discovery, classificação, budget, ContextPlan, telemetria;
+  inclusive uso de memória e da Global Library na seleção de contexto);
+- composição Global Library + conhecimento específico do projeto;
 - agent execution;
 - gates framework;
 - review system;
@@ -183,7 +194,7 @@ engineering/orchestrator/
 
 ---
 
-## 5. Estrutura real após o V0.4
+## 5. Estrutura real após o V1
 
 A estrutura funcional atualmente implementada é:
 
@@ -225,10 +236,23 @@ engineering/
 │   │   ├── safety.py
 │   │   └── service.py
 │   │
+│   ├── library/              # V1
+│   │   ├── __init__.py
+│   │   ├── models.py         # ArtifactType, Authority, AppliesTo, metadata, ProjectProfile, Match
+│   │   ├── loader.py         # resolve_library_root; discover/read/parse/validate
+│   │   └── library.py        # GlobalLibrary: index, by_type, get, resolve
+│   │
 │   └── utils/
 │       ├── files.py
 │       ├── logging.py
-│       └── shell.py
+│       ├── shell.py
+│       └── yaml_loader.py    # V1: safe YAML (duplicate keys rejected), config + library
+│
+├── policies/                 # V1 Global Library (conteúdo; um .md por artefato)
+├── guidelines/
+├── rules/
+├── skills/
+├── specialties/
 │
 ├── config/
 │   ├── project.yaml
@@ -255,7 +279,8 @@ engineering/
 │       ├── sprint-v0.1.md
 │       ├── sprint-v0.2.md
 │       ├── sprint-v0.3.md
-│       └── sprint-v0.4.md
+│       ├── sprint-v0.4.md
+│       └── sprint-v1.md
 │
 ├── tests/
 │   ├── conftest.py
@@ -268,7 +293,7 @@ engineering/
 └── README.md
 ```
 
-A árvore acima representa o estado funcional pós-V0.4.
+A árvore acima representa o estado funcional pós-V1.
 
 Diretórios futuros devem ser adicionados somente quando a versão correspondente os exigir.
 
@@ -286,7 +311,7 @@ Não deve conter configuração específica de um projeto consumidor.
 
 Responsável pela interface CLI atual.
 
-A CLI existente suporta os comandos já implementados pelo projeto: `doctor`, `intake`, o grupo `memory` (V0.3) e o grupo `decision` (V0.4: classify, route, severity, relevance, health).
+A CLI existente suporta os comandos já implementados pelo projeto: `doctor`, `intake`, o grupo `memory` (V0.3), o grupo `decision` (V0.4: classify, route, severity, relevance, health) e o grupo `library` (V1: inspect, resolve).
 
 Ela deve permanecer fina.
 
@@ -383,6 +408,10 @@ Exceção opt-in (V0.4): quando o provider do `decisions.model` está `enabled: 
 healthy → PASS, unavailable → WARN, chave ausente/rejeitada → FAIL. Com Jev desabilitado
 (padrão), nenhuma chamada de rede é feita.
 
+Check `library` (V1): sempre executado e sempre offline. Carrega a Global Library
+(independente da raiz do Harness) e retorna FAIL em erro de estrutura, parsing, schema,
+ID duplicado ou referência inexistente; WARN se a biblioteca estiver vazia.
+
 ### `orchestrator/core/exceptions.py`
 
 Define erros tipados do Harness, incluindo erros de configuração, request e provider.
@@ -434,6 +463,26 @@ Responsável por:
 - fake provider para testes.
 
 O core (`core/`) não importa `memory/`. Somente CLI e `doctor` abrem a memória.
+
+### `orchestrator/library/`
+
+Implementado no V1.
+
+Responsável por:
+
+- contratos dos cinco tipos de artefato (`ArtifactType`) e da sua força normativa
+  (`Authority`, derivada do tipo e nunca declarada pelo autor);
+- localização da biblioteca (`resolve_library_root`: argumento explícito →
+  `$HARNESS_LIBRARY_ROOT` → diretório de instalação do Harness), **independente** de
+  `--root`/`$HARNESS_ROOT`, para que um projeto consumidor herde a biblioteca sem copiá-la;
+- discover → read → parse (front matter YAML seguro) → validate por arquivo, com proteção
+  contra symlinks que saem do diretório esperado, arquivos inesperados e arquivos grandes;
+- `GlobalLibrary`: índice por `(tipo, id)`, IDs duplicados, referências de specialties,
+  `artifacts`/`by_type`/`get` e `resolve(ProjectProfile)` determinístico.
+
+Não conhece CLI, providers, Jev, Mem0, rede ou subprocessos (teste de isolamento). O core
+(`core/`) não importa `library/`; somente CLI e `doctor` a consomem. Não seleciona,
+classifica nem orça contexto (V1.1+).
 
 ### `orchestrator/utils/shell.py`
 
@@ -718,7 +767,11 @@ A fundação já valida:
 - provider habilitado durante model resolution;
 - `memory.yaml`: backend `mem0` exige seção `mem0` (URL http(s), nome da env var da API key, timeout); valores de chave são rejeitados;
 - `decisions.yaml` (V0.4): `model` existe em `models.yaml`; `model` exige `thresholds`; `minimum_confidence` em 0..1;
-- `providers.yaml` (V0.4): campos de conexão opcionais (`base_url` http(s), `api_key_env` nome de env var, `timeout_seconds`); valores de chave rejeitados.
+- `providers.yaml` (V0.4): campos de conexão opcionais (`base_url` http(s), `api_key_env` nome de env var, `timeout_seconds`); valores de chave rejeitados;
+- `project.yaml` (V1): `capabilities` opcional (default `[]`, retrocompatível), ids em minúsculas como `stack`; ambos formam o `ProjectProfile` consumido pela resolução da Global Library.
+
+A Global Library não é configuração: seus artefatos são validados pelo próprio loader
+(`orchestrator/library/`), com schema versionado próprio (`version: 1`).
 
 ---
 
@@ -838,10 +891,11 @@ engineering/
 │   └── utils/
 │
 ├── config/
-├── skills/
-├── specialties/
-├── guidelines/
-├── policies/
+├── skills/          # existe desde o V1
+├── specialties/     # existe desde o V1
+├── guidelines/      # existe desde o V1
+├── policies/        # existe desde o V1
+├── rules/           # existe desde o V1 (adicionado à arquitetura alvo)
 ├── prompts/
 ├── schemas/
 ├── pipelines/
@@ -889,6 +943,10 @@ Context Engineering entra a partir da família:
 ```text
 V1.x — Context Engineering
 ```
+
+A partir do V1.1 o Context Engine consome a `GlobalLibrary` (via `resolve`/`artifacts`)
+como uma das fontes de candidatos; a `Authority` de cada artefato é o insumo para a
+precedência `Policies > ADRs > Task > Project guidelines > Skills/specialties > ... > Memory`.
 
 ### `agents/`
 
@@ -983,16 +1041,15 @@ Essa ordem substitui sequências anteriores presentes em versões antigas da doc
 
 ## 15. Próxima versão
 
-O V0.4 — Decision Foundation está COMPLETE (ver `engineering/docs/sprints/sprint-v0.4.md`;
-prova live 5/5 contra `jev-1.13.0` com `JEV_API_KEY`).
+O V1 — Global Library está COMPLETE (ver `engineering/docs/sprints/sprint-v1.md`).
 
 A próxima versão é:
 
 ```text
-V1 — Global Library
+V1.1 — Context Candidate Discovery
 ```
 
-A Global Library ainda não está implementada.
+O Context Candidate Discovery ainda não está implementado.
 
 ---
 
@@ -1183,6 +1240,22 @@ continuam válidos. `choice ∈ options` é garantido no adapter e no `DecisionS
 `DecisionOutcome` sinaliza `fallback_required` com motivo tipado; nenhum LLM ou humano é
 acionado pelo Harness até o V5.
 
+### Global Library pertence à instalação (V1)
+
+A raiz da biblioteca é resolvida independentemente da raiz de configuração; o projeto
+declara apenas seu perfil (`stack`, `capabilities`) e herda o conhecimento aplicável.
+
+### Força normativa derivada do tipo (V1)
+
+`Authority` vem do tipo do artefato (policy = mandatory; guideline e rule = recommended;
+skill e specialty = knowledge) e não pode ser declarada no arquivo: um guideline nunca
+assume força de policy. Memória e decisões probabilísticas não participam da biblioteca.
+
+### Resolução determinística e explícita (V1)
+
+`applies_to` é `always: true` ou `stacks`/`capabilities`; o match é por igualdade exata
+de strings, sem aliases, Jev ou LLM. Referências de specialties são validadas, não expandidas.
+
 ### Alias lógico separado do model id externo
 
 Configuração pode referenciar modelos semanticamente sem acoplar o core ao identificador do vendor.
@@ -1218,6 +1291,16 @@ Identificadas no V0.4:
 - `minimum_confidence` padrão (0.70) não calibrado; alias `jev-latest` pode mudar sob o threshold;
 - telemetria só em log/objeto (sem persistência: Run Artifacts, V8);
 - sem retry/backoff para 429/529 (política do V5).
+
+Identificadas no V1:
+
+- o wheel empacota só `orchestrator/`; instalação não editável exige `$HARNESS_LIBRARY_ROOT`
+  (mesma limitação já existente para `config/` e `--root`);
+- vocabulário de `stack`/`capabilities` não é controlado: um typo (`postgres` vs
+  `postgresql`) não casa e não gera aviso;
+- a carga para no primeiro erro (não lista todos os problemas de uma vez);
+- referências de specialties não são expandidas pela resolução (routing de specialties: V2.4);
+- sem composição Global + conhecimento local do projeto (loader já é agnóstico de raiz).
 
 Não devem ser resolvidos preventivamente sem necessidade real.
 
@@ -1267,8 +1350,13 @@ Memory Foundation (Mem0 self-hosted, scopes, lineage, safe ingestion)
         ↓
 Decision Foundation (Jev, typed decisions, threshold, fallback contract, telemetry)
         ↓
-Ready for Global Library (V1)
+Global Library (skills, guidelines, policies, rules, specialties; deterministic resolution)
+        ↓
+Ready for Context Candidate Discovery (V1.1)
 ```
+
+A Global Library existe e é resolvida deterministicamente contra o perfil do projeto, mas
+nada ainda seleciona, classifica ou injeta esse conhecimento em prompts.
 
 Ainda não existe provider externo real de inferência generativa.
 

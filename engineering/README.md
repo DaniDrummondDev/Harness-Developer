@@ -3,7 +3,7 @@
 Engineering control plane for LLM-assisted software delivery. The Harness governs the
 workflow; LLMs and other providers are pluggable components, never the sole authority.
 
-**Current version: V0.4 — Decision Foundation.** It provides only:
+**Current version: V1 — Global Library.** It provides only:
 
 - CLI (`python -m orchestrator` / `harness`)
 - declarative configuration (`config/*.yaml`) with typed validation (Pydantic v2)
@@ -21,13 +21,17 @@ workflow; LLMs and other providers are pluggable components, never the sole auth
   typed decisions (choice, score, probability, confidence), configurable confidence
   threshold, fallback contract (signalled, never executed), decision telemetry,
   `decision` commands and an opt-in `doctor` check
+- **V1:** the Global Library — versioned skills, guidelines, policies, rules and
+  specialties owned by the Harness installation, validated on load and resolved
+  deterministically against the project's declared `stack`/`capabilities`; `library`
+  commands and an offline `doctor` check
 
 Memory is auxiliary context, **never a source of truth** (docs, ADRs, policies, task
 contracts and Git win), and nothing writes it automatically. **Jev is probabilistic**:
 even a confidence of 1.0 is a model's belief, never a rule; deterministic rules always
 come first, and the Harness only *signals* that a decision needs a fallback. No
-generative inference provider (OpenAI, Anthropic, NVIDIA), context, agent, gate or
-state-machine capability exists yet; `intake` normalizes and admits a request but
+generative inference provider (OpenAI, Anthropic, NVIDIA), Context Engine (selection,
+classification, budget), agent, gate or state-machine capability exists yet; `intake` normalizes and admits a request but
 executes nothing. See the official docs in [`../docs/`](../docs/) (vision, requirements,
 architecture, roadmap).
 
@@ -162,6 +166,62 @@ human as a fallback in V0.4 (Decision Policy Engine: V5).
 Live proof (opt-in, costs tokens):
 `HARNESS_JEV_INTEGRATION=1 JEV_API_KEY=... pytest -m jev -v -s`.
 
+### Global Library (V1)
+
+Reusable engineering knowledge that ships with the Harness and is **inherited, not
+copied**, by every project. A project only declares its profile in `config/project.yaml`:
+
+```yaml
+project:
+  stack: [php, laravel, mysql, redis, docker]   # technologies
+  capabilities: [api]                          # what it has/does (optional)
+```
+
+```bash
+python -m orchestrator library inspect                 # every artifact (metadata JSON)
+python -m orchestrator library inspect --type policy   # one type
+python -m orchestrator library resolve                 # what applies to project.yaml, and why
+python -m orchestrator library resolve --stack laravel --stack mysql --capability api
+```
+
+Exit codes: 0 ok; 1 invalid library or config (`error: ...` on stderr); 2 usage error.
+
+| Type | Directory | Authority | Meaning |
+|---|---|---|---|
+| policy | `policies/` | mandatory | non-negotiable; nothing below overrides it |
+| guideline | `guidelines/` | recommended | convention / expected practice |
+| rule | `rules/` | recommended | one concrete, verifiable instruction |
+| skill | `skills/` | knowledge | how to do a kind of work well |
+| specialty | `specialties/` | knowledge | a domain; references skills and rules |
+
+Authority comes from the type (it cannot be declared) and orders the output: policies
+first. **Artifact format** — one Markdown file per artifact with YAML front matter:
+
+```markdown
+---
+version: 1                  # schema version (only 1)
+id: laravel                 # ^[a-z][a-z0-9_-]*$, unique per type
+type: skill                 # must match the directory
+name: Laravel
+description: How to implement features in Laravel ...
+tags: [php, web]            # optional classifiers
+applies_to:                 # exactly one form:
+  stacks: [laravel]         #   stacks and/or capabilities (exact match), or
+  # always: true            #   every project
+# specialties only:  skills: [laravel, database]   rules: [thin-controllers]
+---
+Markdown body (inert text; never executed or rendered).
+```
+
+The library is loaded from `$HARNESS_LIBRARY_ROOT` if set, else from the Harness
+installation (this `engineering/` folder) — **never** from `--root`/`$HARNESS_ROOT`, so a
+consumer project with its own `config/` still uses the one shared library. Loading fails
+fast on: missing type directory, unexpected file or subdirectory, symlink leaving its
+directory, file > 256 KiB, non-UTF-8, missing/invalid front matter, duplicate YAML key,
+unsupported `version`, invalid or mismatched `type`, unknown field, missing `id`,
+duplicate id, empty body, unknown specialty reference. Resolution is exact string
+matching (no aliases, Jev or LLM); choosing what enters a prompt is V1.1+.
+
 ### Harness root resolution
 
 The harness root is the folder containing `config/`. It is resolved **without depending on
@@ -173,7 +233,8 @@ the current working directory**:
    which works for source checkouts and editable installs)
 
 If the chosen directory has no `config/`, the command fails with a clear message. A
-non-editable (wheel) install must use `--root` or `$HARNESS_ROOT`.
+non-editable (wheel) install must use `--root` or `$HARNESS_ROOT`, and
+`$HARNESS_LIBRARY_ROOT` for the Global Library (the wheel ships only the package).
 
 ## Configuration
 
@@ -182,7 +243,7 @@ All ten files are **required**, carry `version: 1`, and reject unknown keys.
 
 | File | Content in V0 | Validated invariants |
 |---|---|---|
-| `project.yaml` | name, description, `root`, stack | `root` (relative to harness root) must be an existing directory |
+| `project.yaml` | name, description, `root`, `stack`, `capabilities` (V1, optional) | `root` (relative to harness root) must be an existing directory; stack/capabilities are lowercase ids |
 | `providers.yaml` | provider id → `kind`, all `enabled: false`; optional `base_url`, `api_key_env`, `timeout_seconds` (jev) | identifier keys; a model of a disabled provider cannot be resolved (V0.2); http(s) URL; env var name; no key values |
 | `models.yaml` | logical alias → `provider` + vendor `model_id` (`decision` → jev) | each `provider` exists in `providers.yaml` |
 | `agents.yaml` | roles, `model: null` | each non-null `model` exists in `models.yaml` |
@@ -238,6 +299,7 @@ or API key is ever needed outside the opt-in live tests.
 | `git_repository` | — | project root is not a git work tree |
 | `memory` (only if `memory.enabled`) | API key unset, credentials rejected, bad URL | backend unreachable / failing |
 | `decisions` (only if the decision model's provider is enabled) | `$JEV_API_KEY` unset, credentials rejected | provider unreachable / rate limited / 5xx |
+| `library` (always, offline) | any library structure/parse/schema/duplicate/reference error | library has no artifacts |
 
 ## Layout
 
@@ -245,7 +307,7 @@ or API key is ever needed outside the opt-in live tests.
 engineering/
 ├── orchestrator/          # generic Python core (no project values)
 │   ├── __main__.py        # python -m orchestrator
-│   ├── cli.py             # Typer app: root command, doctor, intake, memory, decision
+│   ├── cli.py             # Typer app: root command, doctor, intake, memory, decision, library
 │   ├── config.py          # root resolution, YAML parsing, schemas, loader
 │   ├── doctor.py          # checks, aggregation, exit code
 │   ├── intake.py          # raw input -> EngineeringRequest (normalization)
@@ -255,8 +317,14 @@ engineering/
 │   ├── providers/         # V0.2: contracts, registry, model resolution, fakes; V0.4: jev.py
 │   ├── memory/            # V0.3: MemoryProvider, Mem0 adapter, safety policy, service, fake
 │   ├── decisions/         # V0.4: DecisionService, outcome/fallback/telemetry models
-│   └── utils/             # shell.py, files.py, logging.py
+│   ├── library/           # V1: Global Library models, loader, GlobalLibrary (resolve)
+│   └── utils/             # shell.py, files.py, logging.py, yaml_loader.py
 ├── config/                # project-specific declarative configuration
+├── policies/              # V1 Global Library content (shared by every project):
+├── guidelines/            #   one Markdown + front matter file per artifact
+├── rules/
+├── skills/
+├── specialties/
 ├── templates/             # plain Markdown templates (adr, sprint, task)
 ├── docs/                  # as-built architecture and sprint records
 └── tests/                 # unit/, integration/ (opt-in live Mem0 / Jev), contract/ suites
