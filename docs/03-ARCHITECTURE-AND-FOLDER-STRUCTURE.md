@@ -2,7 +2,7 @@
 
 ## 1. Objetivo
 
-Este documento descreve a arquitetura atual e a estrutura de pastas do AI Engineering Harness após a conclusão do **V1 — Global Library** (sobre o V0.4 — Decision Foundation).
+Este documento descreve a arquitetura atual e a estrutura de pastas do AI Engineering Harness após a conclusão do **V1.1 — Context Candidate Discovery** (sobre o V1 — Global Library).
 
 Ele possui dois objetivos complementares:
 
@@ -95,9 +95,10 @@ V0.2 — Provider Abstraction     COMPLETE
 V0.3 — Memory Foundation        COMPLETE
 V0.4 — Decision Foundation      COMPLETE
 V1   — Global Library           COMPLETE
+V1.1 — Context Candidate Discovery COMPLETE
 ```
 
-Próxima versão: **V1.1 — Context Candidate Discovery** (não implementada).
+Próxima versão: **V1.2 — Context Classification** (não iniciada).
 
 O projeto possui agora:
 
@@ -133,6 +134,10 @@ O projeto possui agora:
 - resolução determinística contra o perfil do projeto (`project.yaml` → `stack` e o novo
   campo opcional `capabilities`), com motivo por item;
 - comandos `library` (inspect/resolve) e check offline `library` no `doctor`;
+- Context Candidate Discovery (V1.1): `EngineeringRequest` → `ContextDiscoveryResult` com
+  candidatos tipados, determinísticos e com proveniência, vindos da Global Library,
+  instruction files, ADRs, documentação, arquivos citados na requisição e memória (opt-in);
+- comando `context discover` e check `context` no `doctor` (só valida caminhos);
 - contract tests;
 - testes unitários e de integração (incluindo prova real opt-in contra Mem0 e contra Jev);
 - quality gates locais com pytest, Ruff e Mypy.
@@ -145,8 +150,9 @@ Ainda não estão implementados:
 - Decision Policy Engine (deterministic → Jev → LLM → human; V5);
 - fallback automático para LLM ou humano;
 - ingestão automática de memória;
-- Context Engine (candidate discovery, classificação, budget, ContextPlan, telemetria;
-  inclusive uso de memória e da Global Library na seleção de contexto);
+- classificação de contexto (REQUIRED/HIGH_VALUE/OPTIONAL/EXCLUDED), scoring, budget,
+  ContextPlan, context package e telemetria de contexto (V1.2–V1.5);
+- descoberta de task/sprint contracts, Git, previous runs, releases e findings (sem store real);
 - composição Global Library + conhecimento específico do projeto;
 - agent execution;
 - gates framework;
@@ -194,7 +200,7 @@ engineering/orchestrator/
 
 ---
 
-## 5. Estrutura real após o V1
+## 5. Estrutura real após o V1.1
 
 A estrutura funcional atualmente implementada é:
 
@@ -242,6 +248,13 @@ engineering/
 │   │   ├── loader.py         # resolve_library_root; discover/read/parse/validate
 │   │   └── library.py        # GlobalLibrary: index, by_type, get, resolve
 │   │
+│   ├── context/              # V1.1: Context Candidate Discovery
+│   │   ├── __init__.py
+│   │   ├── models.py         # CandidateKind, ContextCandidate, SourceReport, ContextDiscoveryResult
+│   │   ├── files.py          # ProjectFiles: roots contidas, walks limitados, exclusões
+│   │   ├── discoverers.py    # library, instructions, adrs, documentation, repository_hints, memory
+│   │   └── discovery.py      # ContextCandidateDiscovery (merge/sort), build_discovery
+│   │
 │   └── utils/
 │       ├── files.py
 │       ├── logging.py
@@ -280,7 +293,8 @@ engineering/
 │       ├── sprint-v0.2.md
 │       ├── sprint-v0.3.md
 │       ├── sprint-v0.4.md
-│       └── sprint-v1.md
+│       ├── sprint-v1.md
+│       └── sprint-v1.1.md
 │
 ├── tests/
 │   ├── conftest.py
@@ -293,7 +307,7 @@ engineering/
 └── README.md
 ```
 
-A árvore acima representa o estado funcional pós-V1.
+A árvore acima representa o estado funcional pós-V1.1.
 
 Diretórios futuros devem ser adicionados somente quando a versão correspondente os exigir.
 
@@ -311,7 +325,7 @@ Não deve conter configuração específica de um projeto consumidor.
 
 Responsável pela interface CLI atual.
 
-A CLI existente suporta os comandos já implementados pelo projeto: `doctor`, `intake`, o grupo `memory` (V0.3), o grupo `decision` (V0.4: classify, route, severity, relevance, health) e o grupo `library` (V1: inspect, resolve).
+A CLI existente suporta os comandos já implementados pelo projeto: `doctor`, `intake`, o grupo `memory` (V0.3), o grupo `decision` (V0.4: classify, route, severity, relevance, health), o grupo `library` (V1: inspect, resolve) e o grupo `context` (V1.1: discover).
 
 Ela deve permanecer fina.
 
@@ -412,6 +426,10 @@ Check `library` (V1): sempre executado e sempre offline. Carrega a Global Librar
 (independente da raiz do Harness) e retorna FAIL em erro de estrutura, parsing, schema,
 ID duplicado ou referência inexistente; WARN se a biblioteca estiver vazia.
 
+Check `context` (V1.1): executado quando `context.enabled`; apenas valida os caminhos de
+discovery configurados (FAIL se algum resolver fora do projeto; caminhos opcionais ausentes
+aparecem no detalhe do PASS). Nunca executa discovery (que exige uma requisição).
+
 ### `orchestrator/core/exceptions.py`
 
 Define erros tipados do Harness, incluindo erros de configuração, request e provider.
@@ -481,8 +499,39 @@ Responsável por:
   `artifacts`/`by_type`/`get` e `resolve(ProjectProfile)` determinístico.
 
 Não conhece CLI, providers, Jev, Mem0, rede ou subprocessos (teste de isolamento). O core
-(`core/`) não importa `library/`; somente CLI e `doctor` a consomem. Não seleciona,
-classifica nem orça contexto (V1.1+).
+(`core/`) não importa `library/`; CLI, `doctor` e (desde o V1.1) `context/` a consomem.
+Não seleciona, classifica nem orça contexto.
+
+### `orchestrator/context/`
+
+Implementado no V1.1 (somente Context Candidate Discovery).
+
+```text
+EngineeringRequest
+  → ContextCandidateDiscovery.discover()
+      library → instructions → adrs → documentation → repository_hints → memory
+  → merge por recurso canônico → ordenação (kind, id)
+  → ContextDiscoveryResult(request, candidates, sources, unsupported_sources)
+```
+
+Responsável por:
+
+- contrato `ContextCandidate` (id estável, `kind`, título, `reference` store+path,
+  `provenance`, `metadata`), sem classificação, score ou budget;
+- discoverers apenas para fontes reais: Global Library (via `GlobalLibrary.resolve`),
+  instruction files, ADRs, documentação, arquivos citados na requisição (paths/nomes) e
+  memória (via protocolo `MemorySearcher`, somente scope de projeto, opt-in);
+- acesso seguro ao filesystem (`ProjectFiles`): caminhos relativos contidos no projeto,
+  sem seguir diretórios symlink, exclusões fixas e configuráveis, nomes de secrets
+  bloqueados, limite de arquivos por walk e de tamanho, leitura só do início de Markdown;
+- deduplicação por recurso canônico (arquivo resolvido / id de memória) preservando todas
+  as proveniências.
+
+A requisição é o sujeito da descoberta, não um candidato. Erros fatais
+(`ContextDiscoveryError`): contexto desabilitado ou caminho configurado fora do projeto.
+Fontes ausentes, vazias ou indisponíveis geram warnings. Não importa CLI, doctor,
+providers, decisions (sem Jev), serviço/adapters de memória, rede ou subprocessos.
+Fontes ainda não suportadas: task/sprint contracts, Git, previous runs, releases, findings.
 
 ### `orchestrator/utils/shell.py`
 
@@ -770,6 +819,12 @@ A fundação já valida:
 - `providers.yaml` (V0.4): campos de conexão opcionais (`base_url` http(s), `api_key_env` nome de env var, `timeout_seconds`); valores de chave rejeitados;
 - `project.yaml` (V1): `capabilities` opcional (default `[]`, retrocompatível), ids em minúsculas como `stack`; ambos formam o `ProjectProfile` consumido pela resolução da Global Library.
 
+- `context.yaml` (V1.1): `enabled` passa a ter consumidor (habilita `context discover`);
+  seção `discovery` com `instruction_files`, `documentation_paths`, `adr_paths`,
+  `source_roots` (caminhos relativos POSIX, sem `..`, `/`, `~`, normalizados),
+  `exclude_dirs` (nomes), `max_files`, `max_file_bytes`, `memory_results` (limitados);
+  campos extras (ex.: budget) rejeitados.
+
 A Global Library não é configuração: seus artefatos são validados pelo próprio loader
 (`orchestrator/library/`), com schema versionado próprio (`version: 1`).
 
@@ -944,9 +999,11 @@ Context Engineering entra a partir da família:
 V1.x — Context Engineering
 ```
 
-A partir do V1.1 o Context Engine consome a `GlobalLibrary` (via `resolve`/`artifacts`)
-como uma das fontes de candidatos; a `Authority` de cada artefato é o insumo para a
-precedência `Policies > ADRs > Task > Project guidelines > Skills/specialties > ... > Memory`.
+O V1.1 criou `context/` com Context Candidate Discovery; a `GlobalLibrary` é uma de suas
+fontes (via `resolve`) e a `Authority` de cada artefato segue como metadata do candidato,
+insumo para a precedência `Policies > ADRs > Task > Project guidelines >
+Skills/specialties > ... > Memory` que a classificação (V1.2) aplicará. Classification,
+budget, escalation e telemetry (V1.2–V1.5) consomem `ContextDiscoveryResult`.
 
 ### `agents/`
 
@@ -1041,15 +1098,16 @@ Essa ordem substitui sequências anteriores presentes em versões antigas da doc
 
 ## 15. Próxima versão
 
-O V1 — Global Library está COMPLETE (ver `engineering/docs/sprints/sprint-v1.md`).
+O V1.1 — Context Candidate Discovery está COMPLETE (ver
+`engineering/docs/sprints/sprint-v1.1.md`).
 
 A próxima versão é:
 
 ```text
-V1.1 — Context Candidate Discovery
+V1.2 — Context Classification
 ```
 
-O Context Candidate Discovery ainda não está implementado.
+A classificação de contexto ainda não foi iniciada.
 
 ---
 
@@ -1256,6 +1314,19 @@ assume força de policy. Memória e decisões probabilísticas não participam d
 `applies_to` é `always: true` ou `stacks`/`capabilities`; o match é por igualdade exata
 de strings, sem aliases, Jev ou LLM. Referências de specialties são validadas, não expandidas.
 
+### Discovery não é classification (V1.1)
+
+`ContextCandidate` não tem campo de classe, relevância ou budget. Proveniência e metadata
+(autoridade, status de ADR, lineage de memória) ficam disponíveis para o V1.2 decidir.
+A requisição é o sujeito, não um candidato.
+
+### Identidade e deduplicação por recurso canônico (V1.1)
+
+Ids estáveis (`policy/secrets`, `adr/<path>`, `doc/<path>`, `source/<path>`,
+`memory/<id>`); o mesmo recurso (arquivo resolvido ou id de memória) encontrado por vários
+discoverers vira um único candidato com todas as proveniências; o `kind` segue a ordem de
+prioridade de `CandidateKind`. Título nunca participa da identidade.
+
 ### Alias lógico separado do model id externo
 
 Configuração pode referenciar modelos semanticamente sem acoplar o core ao identificador do vendor.
@@ -1301,6 +1372,17 @@ Identificadas no V1:
 - a carga para no primeiro erro (não lista todos os problemas de uma vez);
 - referências de specialties não são expandidas pela resolução (routing de specialties: V2.4);
 - sem composição Global + conhecimento local do projeto (loader já é agnóstico de raiz).
+
+Identificadas no V1.1:
+
+- `MemoryProvider` não possui get-by-id: candidatos de memória carregam um excerpt
+  (≤ 280 caracteres); carregar a memória completa depois exigirá esse método;
+- hints de repositório são léxicos: nomes sem extensão, símbolos (`GlobalLibrary`) e
+  módulos em notação de ponto não são reconhecidos;
+- a busca de memória usa a instrução inteira como query e só o scope de projeto
+  (`origin_ref` é texto livre, não identifica task/run com segurança);
+- walks são refeitos a cada requisição (sem cache/índice);
+- o merge descarta a metadata do candidato de menor prioridade (a proveniência é mantida).
 
 Não devem ser resolvidos preventivamente sem necessidade real.
 
@@ -1352,11 +1434,13 @@ Decision Foundation (Jev, typed decisions, threshold, fallback contract, telemet
         ↓
 Global Library (skills, guidelines, policies, rules, specialties; deterministic resolution)
         ↓
-Ready for Context Candidate Discovery (V1.1)
+Context Candidate Discovery (request → typed, deduplicated candidates with provenance)
+        ↓
+Ready for Context Classification (V1.2)
 ```
 
-A Global Library existe e é resolvida deterministicamente contra o perfil do projeto, mas
-nada ainda seleciona, classifica ou injeta esse conhecimento em prompts.
+O Harness já lista, para uma requisição, as fontes que podem ser relevantes, mas nada
+ainda classifica, pontua, orça ou injeta contexto em prompts.
 
 Ainda não existe provider externo real de inferência generativa.
 

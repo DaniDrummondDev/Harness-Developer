@@ -35,12 +35,15 @@ from bugs (traceback).
     │   ├── MemoryNotFoundError       no stored memory has this id (includes malformed ids)
     │   ├── MemoryConfigurationError  memory disabled/misconfigured or credentials rejected
     │   └── MemoryUnavailableError    backend unreachable, timed out or failing (5xx)
-    └── LibraryError                  Global Library failure (V1); carries the offending path
-        ├── LibraryStructureError     root/type directory missing, unexpected entry, path escape
-        ├── ArtifactParseError        unreadable file, missing front matter, invalid YAML
-        ├── ArtifactValidationError   schema/version/type/directory mismatch, duplicate id,
-        │                             unknown reference
-        └── ArtifactNotFoundError     no artifact of that type has this id
+    ├── LibraryError                  Global Library failure (V1); carries the offending path
+    │   ├── LibraryStructureError     root/type directory missing, unexpected entry, path escape
+    │   ├── ArtifactParseError        unreadable file, missing front matter, invalid YAML
+    │   ├── ArtifactValidationError   schema/version/type/directory mismatch, duplicate id,
+    │   │                             unknown reference
+    │   └── ArtifactNotFoundError     no artifact of that type has this id
+    └── ContextDiscoveryError         fatal context discovery failure (V1.1): context disabled,
+                                      configured root escaping the project. Unavailable or
+                                      empty sources are warnings, never this error.
 
 Names intentionally avoid shadowing builtins (`EnvironmentError`) and
 Pydantic (`ValidationError`).
@@ -232,3 +235,13 @@ class ArtifactValidationError(LibraryError):
 
 class ArtifactNotFoundError(LibraryError):
     """No artifact of the requested type has the requested id."""
+
+
+class ContextDiscoveryError(HarnessError):
+    """Context Candidate Discovery cannot run safely (V1.1): the capability is
+    disabled or a configured root resolves outside the project. A missing optional
+    source, zero candidates or an unavailable memory backend are warnings instead."""
+
+    def __init__(self, message: str, *, path: Path | None = None) -> None:
+        self.path = path
+        super().__init__(f"{path}: {message}" if path else message)

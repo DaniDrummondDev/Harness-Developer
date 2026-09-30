@@ -42,6 +42,31 @@ def test_module_library_resolve_from_foreign_cwd(tmp_path: Path, harness_root: P
     assert result.stderr == ""
 
 
+def test_module_context_discover_from_foreign_cwd(tmp_path: Path, harness_root: Path) -> None:
+    # V1.1: discovery against the fixture project (tmp_path) with the shipped library,
+    # run from an unrelated cwd; paths in the result are project-relative.
+    docs = harness_root.parent / "docs"
+    docs.mkdir()
+    (docs / "notes.md").write_text("# Notes\n", encoding="utf-8")
+    cwd = tmp_path / "elsewhere"
+    cwd.mkdir()
+    result = run_command(
+        [sys.executable, "-m", "orchestrator", "--root", str(harness_root), "context", "discover",
+         "update docs/notes.md"],
+        cwd=cwd,
+        timeout=60,
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    data = json.loads(result.stdout)
+    by_id = {c["id"]: c for c in data["candidates"]}
+    assert "policy/secrets" in by_id and "skill/python" in by_id
+    assert by_id["doc/docs/notes.md"]["reference"] == {"store": "project", "path": "docs/notes.md"}
+    assert {p["discoverer"] for p in by_id["doc/docs/notes.md"]["provenance"]} == {
+        "documentation", "repository_hints",
+    }
+    assert result.stderr == ""
+
+
 def test_module_intake_from_foreign_cwd(tmp_path: Path, harness_root: Path) -> None:
     result = run_command(
         [sys.executable, "-m", "orchestrator", "--root", str(harness_root), "intake", "plan V0.2",

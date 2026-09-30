@@ -32,6 +32,11 @@ from $HARNESS_LIBRARY_ROOT or the installation directory, independent of the
 harness root) and FAILs on any structure, parse, schema, duplicate-id or
 reference error. An empty but well-formed library is a WARN.
 
+`context` (V1.1) runs when the config is valid and `context.enabled`: it only
+validates the configured discovery paths (FAIL if one resolves outside the
+project; absent optional paths are listed in the PASS detail). It never runs a
+discovery: that needs a request and belongs to `context discover`.
+
 To add a check: write `def check_x(...) -> CheckResult`, call it from
 `run_doctor`, and add a test in tests/unit/test_doctor.py.
 """
@@ -53,6 +58,7 @@ from orchestrator.config import (
     missing_config_files,
     resolve_harness_root,
 )
+from orchestrator.context.discovery import check_discovery_paths
 from orchestrator.core.exceptions import CommandError, HarnessError
 from orchestrator.decisions.models import HealthStatus as DecisionHealthStatus
 from orchestrator.decisions.service import DecisionService, open_decisions
@@ -219,6 +225,17 @@ def check_library(library_root: Path | None, environ: Mapping[str, str] | None) 
     return CheckResult("library", CheckStatus.PASS, detail)
 
 
+def check_context(config: HarnessConfig) -> CheckResult:
+    try:
+        missing = check_discovery_paths(config)
+    except HarnessError as exc:
+        return CheckResult("context", CheckStatus.FAIL, str(exc))
+    detail = "discovery paths stay inside the project"
+    if missing:
+        detail += "; optional paths absent: " + ", ".join(missing)
+    return CheckResult("context", CheckStatus.PASS, detail)
+
+
 def check_git_executable(runner: CommandRunner) -> tuple[CheckResult, bool]:
     try:
         result = runner(["git", "--version"], timeout=GIT_TIMEOUT_SECONDS)
@@ -311,6 +328,9 @@ def run_doctor(
                 lambda cfg: open_decisions(cfg, environ)
             )
             results.append(_guarded("decisions", lambda: check_decisions(loaded_cfg, opener)))
+        if config is not None and config.context.enabled:
+            context_cfg = config
+            results.append(_guarded("context", lambda: check_context(context_cfg)))
 
     # Independent of the harness root: the library belongs to the installation.
     results.append(_guarded("library", lambda: check_library(library_root, environ)))

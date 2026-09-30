@@ -19,12 +19,15 @@ Output conventions:
 - `library inspect|resolve` (V1): JSON on stdout, exit 0; an invalid library or
   config -> `error: ...` on stderr, exit 1; unknown --type or malformed
   --stack/--capability -> usage error, exit 2;
+- `context discover` (V1.1): ContextDiscoveryResult as JSON on stdout, exit 0
+  (warnings are part of the JSON, not errors); invalid request/config/library,
+  disabled context or an unsafe discovery path -> `error: ...`, exit 1;
 - usage errors (unknown command/option, bad --log-level) -> Typer/Click, exit 2.
 
 Commands: root (identity + help), `doctor` (V0), `intake` (V0.1), the
 `memory` group (V0.3: health, add, search, update, delete), the `decision`
 group (V0.4: classify, route, severity, relevance, health) and the `library`
-group (V1: inspect, resolve). New
+group (V1: inspect, resolve) and the `context` group (V1.1: discover). New
 commands are added as `@app.command()` functions here, delegating logic to
 their own module.
 """
@@ -42,7 +45,8 @@ from rich.console import Console
 from rich.table import Table
 
 from orchestrator import HARNESS_NAME, __version__
-from orchestrator.config import HARNESS_ROOT_ENV, load_config, resolve_harness_root
+from orchestrator.config import HARNESS_ROOT_ENV, HarnessConfig, load_config, resolve_harness_root
+from orchestrator.context.discovery import build_discovery
 from orchestrator.core.admission import admit
 from orchestrator.core.exceptions import HarnessError
 from orchestrator.core.request import Intent, RequestSource
@@ -106,7 +110,7 @@ def root_command(
         ),
     ] = False,
 ) -> None:
-    """AI Engineering Harness — engineering control plane (V1 global library)."""
+    """AI Engineering Harness — engineering control plane (V1.1 context candidate discovery)."""
     try:
         configure_logging(log_level)
     except ValueError as exc:
@@ -489,6 +493,58 @@ def library_resolve(
         "profile": profile.model_dump(mode="json"),
         "matches": [m.summary() for m in library.resolve(profile)],
     })
+
+
+# --- context (V1.1) ------------------------------------------------------------------
+
+context_app = typer.Typer(
+    help="Context Engineering. V1.1: candidate discovery only — lists sources that MAY be "
+    "relevant; nothing is classified, scored, budgeted or selected. No LLM, no Jev.",
+    no_args_is_help=True,
+    rich_markup_mode=None,
+)
+app.add_typer(context_app, name="context")
+
+
+def _memory_for_context(config: HarnessConfig) -> tuple[MemoryService | None, str | None]:
+    """Memory is optional context: when enabled but not openable, discovery goes on."""
+    if not config.memory.enabled:
+        return None, None
+    try:
+        return open_memory(config), None
+    except HarnessError as exc:
+        return None, str(exc)
+
+
+@context_app.command("discover")
+def context_discover(
+    ctx: typer.Context,
+    instruction: Annotated[str, typer.Argument(help="The request, in natural language.")],
+    intent: Annotated[
+        str | None,
+        typer.Option("--intent", help=f"Kind of work: {', '.join(Intent)}."),
+    ] = None,
+    ref: Annotated[
+        str | None, typer.Option("--ref", help="Originating artifact (task/sprint id or path).")
+    ] = None,
+) -> None:
+    """Normalize and admit a CLI request, then list its context candidates as JSON."""
+    state: CliState = ctx.find_root().obj
+    try:
+        config = load_config(resolve_harness_root(state.root))
+        request = normalize_request(
+            source=RequestSource.CLI, instruction=instruction, intent=intent, origin_ref=ref
+        )
+        admitted = admit(request, config.enabled_modes)
+        library = GlobalLibrary.load(resolve_library_root())
+        memory, memory_error = _memory_for_context(config)
+        discovery = build_discovery(
+            config, library, memory=memory, memory_unavailable=memory_error
+        )
+        result = discovery.discover(admitted.request)
+    except HarnessError as exc:
+        _fail(exc)
+    _echo_json(result.model_dump(mode="json"))
 
 
 def main() -> None:

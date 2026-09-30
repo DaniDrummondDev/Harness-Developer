@@ -3,7 +3,7 @@
 Engineering control plane for LLM-assisted software delivery. The Harness governs the
 workflow; LLMs and other providers are pluggable components, never the sole authority.
 
-**Current version: V1 — Global Library.** It provides only:
+**Current version: V1.1 — Context Candidate Discovery.** It provides only:
 
 - CLI (`python -m orchestrator` / `harness`)
 - declarative configuration (`config/*.yaml`) with typed validation (Pydantic v2)
@@ -25,13 +25,18 @@ workflow; LLMs and other providers are pluggable components, never the sole auth
   specialties owned by the Harness installation, validated on load and resolved
   deterministically against the project's declared `stack`/`capabilities`; `library`
   commands and an offline `doctor` check
+- **V1.1:** Context Candidate Discovery — given a request, a typed, deduplicated and
+  deterministic list of sources that *may* be relevant (library artifacts, instruction
+  files, ADRs, docs, files the request names, memory hits), each with provenance;
+  `context discover` and a `context` doctor check. Nothing is classified, scored,
+  budgeted or selected yet
 
 Memory is auxiliary context, **never a source of truth** (docs, ADRs, policies, task
 contracts and Git win), and nothing writes it automatically. **Jev is probabilistic**:
 even a confidence of 1.0 is a model's belief, never a rule; deterministic rules always
 come first, and the Harness only *signals* that a decision needs a fallback. No
-generative inference provider (OpenAI, Anthropic, NVIDIA), Context Engine (selection,
-classification, budget), agent, gate or state-machine capability exists yet; `intake` normalizes and admits a request but
+generative inference provider (OpenAI, Anthropic, NVIDIA), context classification,
+scoring, budget or selection, agent, gate or state-machine capability exists yet; `intake` normalizes and admits a request but
 executes nothing. See the official docs in [`../docs/`](../docs/) (vision, requirements,
 architecture, roadmap).
 
@@ -222,6 +227,44 @@ unsupported `version`, invalid or mismatched `type`, unknown field, missing `id`
 duplicate id, empty body, unknown specialty reference. Resolution is exact string
 matching (no aliases, Jev or LLM); choosing what enters a prompt is V1.1+.
 
+### Context Candidate Discovery (V1.1)
+
+Answers *"which sources exist that could matter for this request?"* — not which are
+best, not what enters a prompt, not how much fits (V1.2+). No LLM, no Jev.
+
+```bash
+python -m orchestrator context discover "fix rounding in billing/invoice.py" \
+    --intent implement --ref T-12            # ContextDiscoveryResult as JSON
+```
+
+Exit codes: 0 result printed (warnings are inside the JSON); 1 invalid request, config or
+library, `context.enabled: false`, or a discovery path escaping the project; 2 usage error.
+
+| Discoverer | Finds | Candidate id |
+|---|---|---|
+| `library` | Global Library artifacts applying to `project.yaml` (via `GlobalLibrary.resolve`) | `policy/secrets`, `skill/laravel` |
+| `instructions` | existing `instruction_files` (CLAUDE.md, AGENTS.md, ...) | `instructions/CLAUDE.md` |
+| `adrs` | Markdown ADRs under `adr_paths` (+ `status`, `number`) | `adr/docs/adr/0001-x.md` |
+| `documentation` | `.md/.rst/.txt/.adoc` under `documentation_paths` | `doc/docs/guide.md` |
+| `repository_hints` | files the request/`--ref` names: paths (project root or `source_roots`), a directory's direct files, exact file names under `source_roots` | `source/src/billing/invoice.py` |
+| `memory` | project-scope memory hits (only when `memory.enabled`; failures are warnings) | `memory/<id>` |
+
+Each candidate has `id`, `kind`, `title`, `reference` (`store` project/library/memory +
+relative `path`), `provenance` (discoverer + reason) and kind-specific `metadata`
+(authority, ADR status, size, memory lineage...). No content is loaded, except the first
+8 KiB of Markdown files for the title and a ≤280-char memory excerpt. The same resource
+found by several discoverers is **one** candidate with several provenance entries.
+Output order: policies, guidelines, rules, skills, specialties, instructions, ADRs, docs,
+source, memory; then id. The request itself is echoed as `request` (it is the subject,
+not a candidate). Not supported yet (listed as `unsupported_sources`): task/sprint
+contracts, Git, previous runs, releases, findings.
+
+Safety: configured paths are relative (no `/`, `~`, `..`), resolved and required to stay
+inside the project; symlinked directories are not followed; `.git`, virtualenvs,
+`node_modules`, `vendor`, caches, `build`/`dist`, hidden entries and `exclude_dirs` are
+pruned; secret-looking files (`.env*`, keys, credentials) are never candidates; walks stop
+at `max_files`; files over `max_file_bytes` are skipped unread.
+
 ### Harness root resolution
 
 The harness root is the folder containing `config/`. It is resolved **without depending on
@@ -248,7 +291,7 @@ All ten files are **required**, carry `version: 1`, and reject unknown keys.
 | `models.yaml` | logical alias → `provider` + vendor `model_id` (`decision` → jev) | each `provider` exists in `providers.yaml` |
 | `agents.yaml` | roles, `model: null` | each non-null `model` exists in `models.yaml` |
 | `modes.yaml` | `interactive` (enabled), `autonomous` (disabled) | exactly these two modes, both declared; `enabled` gates request admission |
-| `context.yaml` | feature toggle (disabled) | — |
+| `context.yaml` | `enabled` (true; gates `context discover`), `discovery`: `instruction_files`, `documentation_paths`, `adr_paths`, `source_roots`, `exclude_dirs`, `max_files`, `max_file_bytes`, `memory_results` (V1.1) | paths relative POSIX, no `..`/absolute/`~`, normalized; limits bounded; unknown keys rejected |
 | `memory.yaml` | `enabled` (false), `backend: mem0`, `mem0: {base_url, api_key_env, timeout_seconds}` | `enabled` requires `backend`; `mem0` backend requires its section; http(s) URL; env var name; no key values |
 | `decisions.yaml` | escalation order; `model` alias + `thresholds.minimum_confidence` (V0.4) | starts with `deterministic`, no repeats, `human` last; `model` exists in `models.yaml`; `model` requires `thresholds`; threshold in 0..1 |
 | `risks.yaml` | LOW → CRITICAL, default | unique levels, default is a known level |
@@ -300,6 +343,7 @@ or API key is ever needed outside the opt-in live tests.
 | `memory` (only if `memory.enabled`) | API key unset, credentials rejected, bad URL | backend unreachable / failing |
 | `decisions` (only if the decision model's provider is enabled) | `$JEV_API_KEY` unset, credentials rejected | provider unreachable / rate limited / 5xx |
 | `library` (always, offline) | any library structure/parse/schema/duplicate/reference error | library has no artifacts |
+| `context` (only if `context.enabled`; validates paths, never discovers) | a discovery path resolves outside the project | — (absent optional paths are listed in the PASS detail) |
 
 ## Layout
 
@@ -307,7 +351,7 @@ or API key is ever needed outside the opt-in live tests.
 engineering/
 ├── orchestrator/          # generic Python core (no project values)
 │   ├── __main__.py        # python -m orchestrator
-│   ├── cli.py             # Typer app: root command, doctor, intake, memory, decision, library
+│   ├── cli.py             # Typer app: doctor, intake, memory, decision, library, context
 │   ├── config.py          # root resolution, YAML parsing, schemas, loader
 │   ├── doctor.py          # checks, aggregation, exit code
 │   ├── intake.py          # raw input -> EngineeringRequest (normalization)
@@ -318,6 +362,7 @@ engineering/
 │   ├── memory/            # V0.3: MemoryProvider, Mem0 adapter, safety policy, service, fake
 │   ├── decisions/         # V0.4: DecisionService, outcome/fallback/telemetry models
 │   ├── library/           # V1: Global Library models, loader, GlobalLibrary (resolve)
+│   ├── context/           # V1.1: candidate models, safe file access, discoverers, discovery
 │   └── utils/             # shell.py, files.py, logging.py, yaml_loader.py
 ├── config/                # project-specific declarative configuration
 ├── policies/              # V1 Global Library content (shared by every project):

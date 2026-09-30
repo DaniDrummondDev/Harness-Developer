@@ -43,11 +43,14 @@ def test_core_does_not_depend_on_library() -> None:
         assert not {n for n in _imports(path) if n.startswith("orchestrator.library")}, path
 
 
-def test_only_cli_and_doctor_consume_the_library() -> None:
+def test_only_interfaces_and_context_discovery_consume_the_library() -> None:
+    # V1: CLI and doctor. V1.1: context discovery (library is a candidate source).
     consumers = {
         str(path.relative_to(PACKAGE))
         for path in PACKAGE.rglob("*.py")
         if not path.is_relative_to(LIBRARY)
         and any(n.startswith("orchestrator.library") for n in _imports(path))
     }
-    assert consumers == {"cli.py", "doctor.py"}
+    assert consumers == {
+        "cli.py", "doctor.py", "context/discoverers.py", "context/discovery.py",
+    }

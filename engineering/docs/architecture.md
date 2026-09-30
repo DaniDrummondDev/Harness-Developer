@@ -1,4 +1,4 @@
-# Architecture — as built (V1)
+# Architecture — as built (V1.1)
 
 Target architecture: [`../../docs/03-ARCHITECTURE-AND-FOLDER-STRUCTURE.md`](../../docs/03-ARCHITECTURE-AND-FOLDER-STRUCTURE.md).
 This file records **what exists now** and the decisions taken to get here. Modules from
@@ -9,10 +9,14 @@ the target tree are created only when a version needs them.
 | Module | Responsibility | Depends on |
 |---|---|---|
 | `orchestrator/__main__.py` | `python -m orchestrator` entry point | `cli` |
-| `orchestrator/cli.py` | Typer app: root command (identity + help), global options (`--root`, `--log-level`, `--version`), `doctor`, `intake`, **V0.3** `memory` (health/add/search/update/delete) , **V0.4** `decision` (classify/route/severity/relevance/health) and **V1** `library` (inspect/resolve) commands, rendering | `doctor`, `config`, `intake`, `core.admission`, `memory.service`, `decisions.service`, `library.*`, `utils.logging` |
+| `orchestrator/cli.py` | Typer app: root command (identity + help), global options (`--root`, `--log-level`, `--version`), `doctor`, `intake`, **V0.3** `memory` (health/add/search/update/delete) , **V0.4** `decision` (classify/route/severity/relevance/health) , **V1** `library` (inspect/resolve) and **V1.1** `context discover` commands, rendering | `doctor`, `config`, `intake`, `core.admission`, `memory.service`, `decisions.service`, `library.*`, `context.discovery`, `utils.logging` |
 | `orchestrator/library/models.py` | **V1** Global Library contracts: `ArtifactType`, `Authority` (fixed per type), `PRECEDENCE`, `DIRECTORY_BY_TYPE`, `AppliesTo`, `ArtifactMetadata`/`SpecialtyMetadata` (schema v1), `Artifact`, `ProjectProfile`, `Match` | — (Pydantic only) |
 | `orchestrator/library/loader.py` | **V1** `resolve_library_root` (explicit > `$HARNESS_LIBRARY_ROOT` > installation dir); discover → read → parse (front matter) → validate, with path-escape, size and file-type guards | `library.models`, `config` (`default_harness_root` only), `utils.files`, `utils.yaml_loader`, `core.exceptions` |
 | `orchestrator/library/library.py` | **V1** `GlobalLibrary`: index (duplicate ids), reference checks, `artifacts`/`by_type`/`get`, deterministic `resolve(profile)` | `library.loader`, `library.models`, `core.exceptions` |
+| `orchestrator/context/models.py` | **V1.1** `CandidateKind` (merge/output order), `ReferenceStore`, `CandidateReference`, `Provenance`, `ContextCandidate` (no classification/score fields), `SourceStatus`, `SourceReport`, `ContextDiscoveryResult`, `UNSUPPORTED_SOURCES` | `core.request` |
+| `orchestrator/context/files.py` | **V1.1** `ProjectFiles`: configured-path containment (fatal), bounded sorted walks (pruning, no symlinked dirs, secret names, size limit), 8 KiB Markdown head for titles | `core.exceptions` |
+| `orchestrator/context/discoverers.py` | **V1.1** `LibraryDiscoverer`, `InstructionsDiscoverer`, `AdrDiscoverer`, `DocumentationDiscoverer`, `RepositoryHintsDiscoverer` (+ `extract_hints`), `MemoryDiscoverer` (via `MemorySearcher` protocol), `UnconsultedSource` | `context.files/models`, `library`, `memory.models`, `core` |
+| `orchestrator/context/discovery.py` | **V1.1** `ContextCandidateDiscovery` (run, merge by canonical resource, sort), `build_discovery(config, library, memory=...)`, `check_discovery_paths` | `config`, `context.*`, `library`, `core` |
 | `orchestrator/utils/yaml_loader.py` | **V1** (extracted from `config.py`) safe YAML parsing that rejects duplicate keys; shared by config and library | — (PyYAML only) |
 | `orchestrator/doctor.py` | Deterministic checks, aggregation (worst status wins), exit code; **V0.3** opt-in `memory` check; **V0.4** opt-in `decisions` check | `config`, `utils.shell`, `memory.service`, `decisions.service` |
 | `orchestrator/config.py` | Harness-root resolution, YAML parsing, Pydantic schemas, cross-file checks, `HarnessConfig` (incl. `enabled_modes`) | `utils.files`, `core.exceptions`, `core.request` |
@@ -48,7 +52,11 @@ requests or YAML parsing. Since V0.4 the CLI and `doctor` reach providers only t
 `memory/service.py` imports the Mem0 adapter, and only `cli.py`/`doctor.py` open memory
 (guarded by `tests/unit/test_memory_isolation.py`). `library/` (V1) knows nothing about
 CLI, providers, memory, decisions, network or subprocesses; `core/` does not import it and
-only `cli.py`/`doctor.py` consume it (guarded by `tests/unit/test_library_isolation.py`).
+only `cli.py`/`doctor.py` and, since V1.1, `context/` consume it (guarded by
+`tests/unit/test_library_isolation.py`). `context/` (V1.1) never imports CLI, doctor,
+providers, decisions (no Jev), the memory service/adapters, network or subprocesses; it
+searches memory only through the `MemorySearcher` protocol, so opening memory stays with
+`cli.py`/`doctor.py` (guarded by `tests/unit/test_context_discovery.py`).
 
 ## Main flows
 
@@ -68,7 +76,8 @@ resolve_harness_root(--root | $HARNESS_ROOT | package dir)   -> HarnessPathError
 **Doctor**
 
 ```text
-python → harness_root → [permissions, config_files, config_valid, structure, memory*, decisions**] → library*** → git → [git_repository]
+python → harness_root → [permissions, config_files, config_valid, structure, memory*, decisions**, context****] → library*** → git → [git_repository]
+**** context (V1.1): only when context.enabled — validates discovery paths (escape = FAIL), never discovers
                          (only if root found)                                                                          (only if git + config ok)
 *** library (V1): always, offline, independent of the harness root — load errors FAIL, empty library WARN
 * memory: only when memory.yaml has enabled: true — healthy PASS, unavailable WARN, misconfigured FAIL
@@ -198,7 +207,35 @@ library.resolve(ProjectProfile(stack, capabilities))   # from project.yaml
 ```
 
 `harness library inspect [--type]` and `harness library resolve [--stack …] [--capability …]`
-print these as JSON. Nothing selects, ranks or budgets knowledge for a prompt yet (V1.1+).
+print these as JSON. Nothing selects, ranks or budgets knowledge for a prompt yet (V1.2+).
+
+**Context Candidate Discovery (V1.1)**
+
+```text
+harness context discover "<instruction>" [--intent] [--ref]
+  load_config → normalize_request(source=cli) → admit()          (same path as intake)
+  GlobalLibrary.load(resolve_library_root())
+  memory.enabled ? open_memory(config) (failure → reason, not an error) : none
+  build_discovery(config, library, memory=…)
+    context.enabled false ─────────────────────────────────────> ContextDiscoveryError
+    every configured path resolves inside project root, else ──> ContextDiscoveryError
+  ContextCandidateDiscovery.discover(request), fixed order:
+    library           GlobalLibrary.resolve(ProjectProfile(stack, capabilities))
+    instructions      instruction_files that exist
+    adrs              walk adr_paths (*.md; README/index/template skipped; status, number)
+    documentation     walk documentation_paths (.md .markdown .rst .txt .adoc)
+    repository_hints  extract_hints(instruction, origin_ref):
+                        path → project root, then each source root (dir → direct files)
+                        file name → exact match in a bounded walk of source_roots
+                        outside project / excluded dir / secret name → rejected (warning)
+    memory            MemorySearcher.search(instruction, project scope, memory_results)
+                        MemoryStoreError → UNAVAILABLE + warning; disabled → SKIPPED
+  merge by canonical resource (resolved file / memory id): one candidate, all provenance,
+    kind = first in CandidateKind order
+  sort (kind order, id) → ContextDiscoveryResult(request, candidates, sources, unsupported)
+```
+
+No classification, score, budget, content loading, LLM or Jev (V1.2+).
 
 ## Decisions (V0)
 
@@ -321,6 +358,25 @@ Rationale and alternatives: [`sprints/sprint-v1.md`](sprints/sprint-v1.md).
 8. **Specialty references are validated, not expanded** by resolution.
 9. **Fail fast, stable order**: the first error in (type, filename) order stops the load.
 
+## Decisions (V1.1)
+
+Rationale and alternatives: [`sprints/sprint-v1.1.md`](sprints/sprint-v1.1.md).
+
+1. **Discovery is not classification**: candidates have no class, relevance or budget
+   field; library authority and memory backend scores are metadata, not decisions.
+2. **The request is the subject, not a candidate**; the result echoes it.
+3. **Only sources with a real store**: library, instruction files, ADRs, docs, repository
+   hints, memory. Task/sprint contracts, Git, runs, releases, findings are listed as
+   unsupported, never simulated.
+4. **References, not content**: store + project/library-relative path or memory id.
+5. **Dedup by canonical resource** (resolved path / memory id), never by title; one
+   candidate keeps every provenance; kind by `CandidateKind` priority.
+6. **Explicit roots only**, relative and contained; unsafe configuration is fatal,
+   missing or failing sources are warnings.
+7. **Library via `GlobalLibrary.resolve`**, profile-based (not text-based).
+8. **Memory through a protocol** (`MemorySearcher`), project scope, read-only, opt-in.
+9. **`context.enabled` now gates discovery** (shipped `true`).
+
 ## Where to change things
 
 - New CLI command → `cli.py` (`@app.command()`), logic in its own module.
@@ -364,3 +420,10 @@ Rationale and alternatives: [`sprints/sprint-v1.md`](sprints/sprint-v1.md).
   `METADATA_MODEL_BY_TYPE` if it has its own fields) + the directory.
 - New matching criterion → `AppliesTo` (field + `reasons`) and, if the project declares
   it, `ProjectSection` in `config.py` and `ProjectProfile`.
+- New candidate source (e.g. Git in V7, runs in V8) → a `CandidateKind` value (its
+  position = merge/output priority), a discoverer class in `context/discoverers.py`
+  returning `Discovered`, wiring in `build_discovery`, and removal from
+  `UNSUPPORTED_SOURCES`. Only when the source really exists.
+- Discovery roots/limits → `config/context.yaml`; a new option → `DiscoverySection` + its
+  consumer. Built-in excluded dirs / secret names → `context/files.py`.
+- Hint extraction rules → `extract_hints` in `context/discoverers.py` (+ parametrized tests).

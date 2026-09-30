@@ -1,5 +1,34 @@
-# Context Engineering (V1.x). Declared only; no context engine in V0.
+# Context Engineering (V1.x). V1.1 implements Context Candidate Discovery only:
+# it lists sources that MAY be relevant to a request. It does not classify,
+# score, budget or select anything (V1.2+). `enabled` gates `context discover`.
+#
+# Every path is relative to the project root (project.yaml `root`) and must stay
+# inside it; `..`, absolute paths and `~` are rejected. Limits protect the
+# discovery walk itself (they are not a context budget).
 version: 1
 context:
-  enabled: false
-  description: Candidate discovery, classification, scoring and budget.
+  enabled: true
+  description: Candidate discovery (V1.1); classification, scoring and budget come later.
+  discovery:
+    # Agent/project instruction files (only those that exist are listed).
+    instruction_files:
+      - CLAUDE.md
+    # Directories (walked) or single files treated as documentation.
+    documentation_paths:
+      - README.md
+      - docs
+      - engineering/README.md
+      - engineering/docs
+    # Directories (walked) or files holding ADRs. Optional: absent -> warning.
+    adr_paths:
+      - docs/adr
+    # Where file names mentioned in a request are looked up.
+    source_roots:
+      - engineering
+    # Directory names pruned everywhere, on top of the built-in list
+    # (.git, .venv, node_modules, vendor, caches, build output, ...).
+    exclude_dirs:
+      - graft
+    max_files: 5000           # files visited per walked root
+    max_file_bytes: 1048576   # larger files are skipped (never read)
+    memory_results: 5         # memory search hits (only when memory.enabled)

@@ -15,8 +15,13 @@ V1 (Global Library): versioned skills, guidelines, policies, rules and
 specialties owned by the installation; typed loading/validation, deterministic
 resolution against the project profile, the `library` CLI group and a
 `library` doctor check.
+V1.1 (Context Candidate Discovery): `orchestrator/context/` lists sources that
+may be relevant to a request (library, instructions, ADRs, docs, repository
+hints, memory) as typed, deduplicated, provenance-carrying candidates — no
+classification, scoring or budget; `context discover` and a `context` doctor
+check.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 HARNESS_NAME = "AI Engineering Harness"

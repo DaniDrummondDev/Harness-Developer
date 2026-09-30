@@ -30,7 +30,14 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 from pydantic import ValidationError as PydanticValidationError
 
 from orchestrator.core.exceptions import (
@@ -145,8 +152,48 @@ class ModesFile(_VersionedFile):
         return self
 
 
+def _check_relative_path(value: str) -> str:
+    """A path relative to the project root that cannot leave it syntactically:
+    POSIX separators, not absolute, no `..`, no `~`. (Symlinks are checked at
+    runtime by the discovery layer, which resolves every root.)"""
+    if "\\" in value or value.startswith(("/", "~")) or ":" in value:
+        raise ValueError(f"'{value}' must be a relative POSIX path inside the project")
+    parts = [p for p in value.split("/") if p not in ("", ".")]
+    if ".." in parts:
+        raise ValueError(f"'{value}' must not contain '..'")
+    return "/".join(parts) or "."
+
+
+ProjectRelativePath = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1),
+    AfterValidator(_check_relative_path),
+]
+# A directory *name* pruned anywhere in a walk (e.g. `graft`), never a path.
+DirName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.][A-Za-z0-9_.-]*$")]
+
+
+class DiscoverySection(_StrictModel):
+    """Context Candidate Discovery (V1.1). Every path is relative to the project
+    root. Limits protect the discovery walk itself; they are not a context budget."""
+
+    instruction_files: list[ProjectRelativePath] = Field(default_factory=list)
+    documentation_paths: list[ProjectRelativePath] = Field(default_factory=list)
+    adr_paths: list[ProjectRelativePath] = Field(default_factory=list)
+    source_roots: list[ProjectRelativePath] = Field(default_factory=lambda: ["."])
+    exclude_dirs: list[DirName] = Field(default_factory=list)
+    max_files: int = Field(default=5000, ge=1, le=100_000)
+    max_file_bytes: int = Field(default=1_048_576, ge=1, le=64 * 1_048_576)
+    memory_results: int = Field(default=5, ge=1, le=50)
+
+
+class ContextSection(FeatureSection):
+    # `enabled` gates Context Engineering (consumed by context.discovery since V1.1).
+    discovery: DiscoverySection = Field(default_factory=DiscoverySection)
+
+
 class ContextFile(_VersionedFile):
-    context: FeatureSection
+    context: ContextSection
 
 
 class Mem0Section(_StrictModel):
@@ -261,7 +308,7 @@ class HarnessConfig(_StrictModel):
     models: dict[str, ModelEntry]
     roles: dict[str, RoleEntry]
     modes: dict[ExecutionMode, FeatureSection]
-    context: FeatureSection
+    context: ContextSection
     memory: MemorySection
     decisions: DecisionsSection
     risks: RisksSection
