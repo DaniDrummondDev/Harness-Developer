@@ -24,9 +24,15 @@ V1.2 (Context Classification): `orchestrator/context/classification/` gives each
 candidate exactly one of REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED with who
 decided (deterministic rule, Jev via DecisionService, or conservative OPTIONAL
 fallback) and structured evidence; `context classify` and a structural
-`classification` doctor check. No budget or prompt selection.
+`classification` doctor check.
+V1.3 (Context Budget): `orchestrator/context/budget/` selects, whole items only,
+the classified candidates that fit a character budget (total - reserve, category
+and max_files/max_adrs/max_memories limits): REQUIRED always, then HIGH_VALUE,
+then OPTIONAL, EXCLUDED never; REQUIRED that does not fit is an explicit status,
+never dropped. `context budget` and a structural `budget` doctor check. No
+prompt rendering.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 HARNESS_NAME = "AI Engineering Harness"

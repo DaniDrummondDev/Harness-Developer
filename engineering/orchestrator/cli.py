@@ -25,12 +25,17 @@ Output conventions:
 - `context classify` (V1.2): discover + classify, ContextClassificationResult as
   JSON, exit 0 (a disabled/unreachable decision layer is a warning in the JSON:
   unresolved candidates use the conservative fallback); same errors as discover;
+- `context budget` (V1.3): discover + classify + budget, ContextBudgetResult as
+  JSON (selected items' text only with `--content`); exit 0 on SUCCESS, 3 on
+  REQUIRED_OVERFLOW / REQUIRED_UNAVAILABLE (a result that needs escalation, not an
+  error); same errors as discover;
 - usage errors (unknown command/option, bad --log-level) -> Typer/Click, exit 2.
 
 Commands: root (identity + help), `doctor` (V0), `intake` (V0.1), the
 `memory` group (V0.3: health, add, search, update, delete), the `decision`
 group (V0.4: classify, route, severity, relevance, health) and the `library`
-group (V1: inspect, resolve) and the `context` group (V1.1: discover; V1.2: classify). New
+group (V1: inspect, resolve) and the `context` group (V1.1: discover; V1.2: classify;
+V1.3: budget). New
 commands are added as `@app.command()` functions here, delegating logic to
 their own module.
 """
@@ -49,7 +54,10 @@ from rich.table import Table
 
 from orchestrator import HARNESS_NAME, __version__
 from orchestrator.config import HARNESS_ROOT_ENV, HarnessConfig, load_config, resolve_harness_root
+from orchestrator.context.budget.budgeter import build_budgeter
+from orchestrator.context.budget.models import BudgetStatus
 from orchestrator.context.classification.classifier import build_classifier
+from orchestrator.context.classification.models import ContextClassificationResult
 from orchestrator.context.discovery import build_discovery
 from orchestrator.context.models import ContextDiscoveryResult
 from orchestrator.core.admission import admit
@@ -115,7 +123,7 @@ def root_command(
         ),
     ] = False,
 ) -> None:
-    """AI Engineering Harness — engineering control plane (V1.2 context classification)."""
+    """AI Engineering Harness — engineering control plane (V1.3 context budget)."""
     try:
         configure_logging(log_level)
     except ValueError as exc:
@@ -505,8 +513,9 @@ def library_resolve(
 context_app = typer.Typer(
     help="Context Engineering. `discover` (V1.1) lists sources that MAY be relevant; "
     "`classify` (V1.2) labels each REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED "
-    "(deterministic rules first, then Jev if enabled, else a conservative fallback). "
-    "Nothing is budgeted or selected for a prompt.",
+    "(deterministic rules first, then Jev if enabled, else a conservative fallback); "
+    "`budget` (V1.3) selects, whole items only, what fits the character budget "
+    "(REQUIRED always; never rendered into a prompt).",
     no_args_is_help=True,
     rich_markup_mode=None,
 )
@@ -544,17 +553,24 @@ _RefOpt = Annotated[
 
 
 def _discover(
-    config: HarnessConfig, instruction: str, intent: str | None, ref: str | None
+    config: HarnessConfig, library: GlobalLibrary, instruction: str, intent: str | None,
+    ref: str | None,
 ) -> ContextDiscoveryResult:
     """Normalize and admit a CLI request, then discover its candidates (raises HarnessError)."""
     request = normalize_request(
         source=RequestSource.CLI, instruction=instruction, intent=intent, origin_ref=ref
     )
     admitted = admit(request, config.enabled_modes)
-    library = GlobalLibrary.load(resolve_library_root())
     memory, memory_error = _memory_for_context(config)
     discovery = build_discovery(config, library, memory=memory, memory_unavailable=memory_error)
     return discovery.discover(admitted.request)
+
+
+def _classify(config: HarnessConfig, discovered: ContextDiscoveryResult
+              ) -> ContextClassificationResult:
+    decider, decider_error = _decider_for_context(config)
+    classifier = build_classifier(config, decider=decider, decider_unavailable=decider_error)
+    return classifier.classify(discovered)
 
 
 @context_app.command("discover")
@@ -565,7 +581,8 @@ def context_discover(
     """Normalize and admit a CLI request, then list its context candidates as JSON."""
     state: CliState = ctx.find_root().obj
     try:
-        result = _discover(load_config(resolve_harness_root(state.root)), instruction, intent, ref)
+        config = load_config(resolve_harness_root(state.root))
+        result = _discover(config, _load_library(), instruction, intent, ref)
     except HarnessError as exc:
         _fail(exc)
     _echo_json(result.model_dump(mode="json"))
@@ -581,13 +598,38 @@ def context_classify(
     state: CliState = ctx.find_root().obj
     try:
         config = load_config(resolve_harness_root(state.root))
-        discovered = _discover(config, instruction, intent, ref)
-        decider, decider_error = _decider_for_context(config)
-        classifier = build_classifier(config, decider=decider, decider_unavailable=decider_error)
-        result = classifier.classify(discovered)
+        result = _classify(config, _discover(config, _load_library(), instruction, intent, ref))
     except HarnessError as exc:
         _fail(exc)
     _echo_json(result.model_dump(mode="json"))
+
+
+# Exit code when the budget result needs escalation (same meaning as decision's 3).
+EXIT_REQUIRED_CONFLICT = 3
+# Summary view: the loaded text of selected items is printed only with --content.
+_WITHOUT_CONTENT = {"selected": {"__all__": {"content"}}}
+
+
+@context_app.command("budget")
+def context_budget(
+    ctx: typer.Context, instruction: _InstructionArg, intent: _IntentOpt = None,
+    ref: _RefOpt = None,
+    content: Annotated[
+        bool, typer.Option("--content", help="Include the text of the selected items.")
+    ] = False,
+) -> None:
+    """Discover, classify, then select what fits the context budget (context.yaml
+    `budget`) as JSON. Exit 0 on SUCCESS, 3 on REQUIRED_OVERFLOW / REQUIRED_UNAVAILABLE."""
+    state: CliState = ctx.find_root().obj
+    try:
+        config = load_config(resolve_harness_root(state.root))
+        library = _load_library()
+        classified = _classify(config, _discover(config, library, instruction, intent, ref))
+        result = build_budgeter(config, library).budget(classified)
+    except HarnessError as exc:
+        _fail(exc)
+    _echo_json(result.model_dump(mode="json", exclude=None if content else _WITHOUT_CONTENT))
+    raise typer.Exit(code=0 if result.status is BudgetStatus.SUCCESS else EXIT_REQUIRED_CONFLICT)
 
 
 def main() -> None:

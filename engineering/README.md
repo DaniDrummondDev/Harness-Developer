@@ -3,7 +3,7 @@
 Engineering control plane for LLM-assisted software delivery. The Harness governs the
 workflow; LLMs and other providers are pluggable components, never the sole authority.
 
-**Current version: V1.2 — Context Classification.** It provides only:
+**Current version: V1.3 — Context Budget.** It provides only:
 
 - CLI (`python -m orchestrator` / `harness`)
 - declarative configuration (`config/*.yaml`) with typed validation (Pydantic v2)
@@ -32,13 +32,18 @@ workflow; LLMs and other providers are pluggable components, never the sole auth
 - **V1.2:** Context Classification — every discovered candidate gets exactly one of
   REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED, with who decided (deterministic rule,
   Jev, or conservative fallback) and structured evidence; `context classify` and a
-  structural `classification` doctor check. Nothing is budgeted or selected yet
+  structural `classification` doctor check
+- **V1.3:** Context Budget — the classified candidates that fit a character budget
+  (total − reserve, per-category and max files/ADRs/memories limits), selected whole:
+  every REQUIRED, then HIGH_VALUE, then OPTIONAL, EXCLUDED never; a REQUIRED set that
+  does not fit is an explicit status, never silently dropped; `context budget` and a
+  structural `budget` doctor check. Nothing is rendered into a prompt yet
 
 Memory is auxiliary context, **never a source of truth** (docs, ADRs, policies, task
 contracts and Git win), and nothing writes it automatically. **Jev is probabilistic**:
 even a confidence of 1.0 is a model's belief, never a rule; deterministic rules always
 come first, and the Harness only *signals* that a decision needs a fallback. No
-generative inference provider (OpenAI, Anthropic, NVIDIA), context budget or selection, agent, gate or state-machine capability exists yet; `intake` normalizes and admits a request but
+generative inference provider (OpenAI, Anthropic, NVIDIA), prompt rendering, agent, gate or state-machine capability exists yet; `intake` normalizes and admits a request but
 executes nothing. See the official docs in [`../docs/`](../docs/) (vision, requirements,
 architecture, roadmap).
 
@@ -274,8 +279,8 @@ metadata value, the winning kind's value is kept and the dropped one is listed u
 
 ### Context Classification (V1.2)
 
-Answers *"how important is each candidate for this request?"* — not how much fits or
-what enters the prompt (V1.3+).
+Answers *"how important is each candidate for this request?"* — not how much fits
+(V1.3, below).
 
 ```bash
 python -m orchestrator context classify "fix rounding in src/billing/ per docs/adr/0001.md"
@@ -320,6 +325,51 @@ Each output item is `{candidate, classification}`; `classification` has `classif
 (`suggestion` when a low-confidence answer was not accepted). Items are ordered by class,
 kind, id — stability only, not a selection.
 
+### Context Budget (V1.3)
+
+Answers *"given the classified candidates, which fit the budget and which stay out —
+and why?"*. It never reclassifies, calls Jev or an LLM, or renders a prompt.
+
+```bash
+python -m orchestrator context budget "fix rounding in src/billing/invoice.py"
+# discover + classify + budget: ContextBudgetResult as JSON (summary: no item text)
+python -m orchestrator context budget "..." --content   # include the selected items' text
+```
+
+Exit codes: 0 `SUCCESS`; **3** `REQUIRED_OVERFLOW` / `REQUIRED_UNAVAILABLE` (the JSON is
+still printed: a result that needs escalation, not an error); 1 invalid request/config;
+2 usage error.
+
+- **Unit: characters** — Unicode code points of the loaded text (`len`), never tokens
+  (no tokenizer, provider-neutral). File sizes in bytes are never used as a measure.
+- **Reserve**: `usable = total − reserve`; the reserve stays free for everything that is
+  not context (system prompt, task, output, tool metadata).
+- **Order**: every REQUIRED → HIGH_VALUE → OPTIONAL; EXCLUDED is never loaded or selected.
+  Inside a class: deterministic → probabilistic (higher confidence first) → fallback,
+  then candidate kind (library first … memory last), then id.
+- **Whole items** (`truncation: whole_item`): an item fits entirely or is skipped, and the
+  scan goes on (a smaller later item may still fit). No cutting, no summarization.
+- **REQUIRED is never dropped.** Above `usable` → status `REQUIRED_OVERFLOW` (all REQUIRED
+  kept, nothing else considered). A REQUIRED whose content cannot be loaded (missing,
+  binary, not UTF-8, secret name, too large) → `REQUIRED_UNAVAILABLE`. A REQUIRED set above
+  a category or `max_*` limit is kept and listed in `conflicts`.
+- **Limits** (non-REQUIRED items): category characters (`library`, `instructions`, `adrs`,
+  `documentation`, `source_code`, `memory`), `max_files` (project files), `max_adrs`,
+  `max_memories`. REQUIRED usage counts toward them.
+
+Each item is `{classified: {candidate, classification}, category, reason, size,
+included_size, detail?, content?}` in `selected`, `not_selected` or `excluded`; `reason` is
+one of `required`, `within_budget`, `excluded_by_classification`, `content_unavailable`,
+`required_overflow`, `max_files_reached`, `max_adrs_reached`, `max_memories_reached`,
+`item_too_large`, `total_budget_exhausted`, `category_budget_exhausted`. `usage` has
+`total`, `reserve`, `usable`, `used`, `remaining`, `overflow`, `by_category`, `files`,
+`adrs`, `memories`.
+
+Content is loaded lazily (only for items still eligible) and safely: project files through
+the same rules as discovery (inside the project after resolving symlinks, no excluded dir,
+no secret-looking name, ≤ `max_file_bytes`), then NUL byte → binary, strict UTF-8; library
+artifacts from the already-loaded library (body only); memory from its ≤ 280-char excerpt.
+
 ### Harness root resolution
 
 The harness root is the folder containing `config/`. It is resolved **without depending on
@@ -346,7 +396,7 @@ All ten files are **required**, carry `version: 1`, and reject unknown keys.
 | `models.yaml` | logical alias → `provider` + vendor `model_id` (`decision` → jev) | each `provider` exists in `providers.yaml` |
 | `agents.yaml` | roles, `model: null` | each non-null `model` exists in `models.yaml` |
 | `modes.yaml` | `interactive` (enabled), `autonomous` (disabled) | exactly these two modes, both declared; `enabled` gates request admission |
-| `context.yaml` | `enabled` (true; gates `context discover`/`classify`), `discovery`: `instruction_files`, `documentation_paths`, `adr_paths`, `source_roots`, `exclude_dirs`, `max_files`, `max_file_bytes`, `memory_results` (V1.1); `classification`: `probabilistic` (true), `max_decisions` (50) (V1.2; the threshold is decisions.yaml's) | paths relative POSIX, no `..`/absolute/`~`, normalized; limits bounded; unknown keys rejected |
+| `context.yaml` | `enabled` (true; gates `context discover`/`classify`/`budget`), `discovery`: `instruction_files`, `documentation_paths`, `adr_paths`, `source_roots`, `exclude_dirs`, `max_files`, `max_file_bytes`, `memory_results` (V1.1); `classification`: `probabilistic` (true), `max_decisions` (50) (V1.2; the threshold is decisions.yaml's); `budget` (V1.3): `unit: characters`, `truncation: whole_item`, `total` (100000), `reserve` (20000), `categories` (library 20000, adrs 15000, documentation 25000, source_code 40000, memory 2000; instructions none), `max_files` (20), `max_adrs` (5), `max_memories` (5) | paths relative POSIX, no `..`/absolute/`~`, normalized; limits bounded; `total ≥ 1`, `0 ≤ reserve < total`, limits `≥ 0`; unknown keys (and categories) rejected |
 | `memory.yaml` | `enabled` (false), `backend: mem0`, `mem0: {base_url, api_key_env, timeout_seconds}` | `enabled` requires `backend`; `mem0` backend requires its section; http(s) URL; env var name; no key values |
 | `decisions.yaml` | escalation order; `model` alias + `thresholds.minimum_confidence` (V0.4) | starts with `deterministic`, no repeats, `human` last; `model` exists in `models.yaml`; `model` requires `thresholds`; threshold in 0..1 |
 | `risks.yaml` | LOW → CRITICAL, default | unique levels, default is a known level |
@@ -400,6 +450,7 @@ or API key is ever needed outside the opt-in live tests.
 | `library` (always, offline) | any library structure/parse/schema/duplicate/reference error | library has no artifacts |
 | `context` (only if `context.enabled`; validates paths, never discovers) | a discovery path resolves outside the project | — (absent optional paths are listed in the PASS detail) |
 | `classification` (with `context`; structural, offline, never classifies) | — | `probabilistic: true` but decisions.yaml has no model |
+| `budget` (with `context`; structural, offline, never loads content or selects) | — (invalid budget config already fails `config_valid`) | a category limit ≥ usable (it can never bind) |
 
 ## Layout
 
@@ -419,7 +470,8 @@ engineering/
 │   ├── decisions/         # V0.4: DecisionService, outcome/fallback/telemetry models
 │   ├── library/           # V1: Global Library models, loader, GlobalLibrary (resolve)
 │   ├── context/           # V1.1: candidate models, safe file access, discoverers, discovery
-│   │   └── classification/ # V1.2: models, deterministic rules, Jev classifier, composition
+│   │   ├── classification/ # V1.2: models, deterministic rules, Jev classifier, composition
+│   │   └── budget/        # V1.3: models, content loader, budgeter (selection policy)
 │   └── utils/             # shell.py, files.py, logging.py, yaml_loader.py
 ├── config/                # project-specific declarative configuration
 ├── policies/              # V1 Global Library content (shared by every project):
@@ -452,3 +504,7 @@ mypy                      # strict type checking of orchestrator/
   (key). `--log-level INFO` prints one telemetry JSON line per decision (provider, model,
   choice, confidence, score, duration, fallback reason, error category — never the
   question, subject or key). A `fallback_required` outcome carries a sanitized `detail`.
+- Budget: `harness context budget "..." | jq '[.selected[], .not_selected[], .excluded[]]
+  | .[] | [.classified.classification.classification, .reason, .size,
+  .classified.candidate.id]'` answers "in or out, and why" per candidate; `.usage` and
+  `.conflicts` explain the totals; `harness doctor` shows the budget in effect.

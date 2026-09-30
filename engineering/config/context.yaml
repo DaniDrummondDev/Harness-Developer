@@ -1,15 +1,16 @@
 # Context Engineering (V1.x). V1.1 Context Candidate Discovery lists sources that
 # MAY be relevant to a request; V1.2 Context Classification labels each one
-# REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED. Nothing is budgeted or selected
-# for a prompt yet (V1.3+). `enabled` gates `context discover|classify`.
+# REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED; V1.3 Context Budget selects, whole
+# items only, what fits. Nothing is rendered into a prompt yet (V2+).
+# `enabled` gates `context discover|classify|budget`.
 #
 # Every path is relative to the project root (project.yaml `root`) and must stay
-# inside it; `..`, absolute paths and `~` are rejected. Limits protect the
-# discovery walk itself (they are not a context budget).
+# inside it; `..`, absolute paths and `~` are rejected. Discovery limits protect
+# the discovery walk itself; the context budget is the `budget` section.
 version: 1
 context:
   enabled: true
-  description: Candidate discovery (V1.1) and classification (V1.2); budget comes later.
+  description: Candidate discovery (V1.1), classification (V1.2) and budget (V1.3).
   discovery:
     # Agent/project instruction files (only those that exist are listed).
     instruction_files:
@@ -31,7 +32,7 @@ context:
     exclude_dirs:
       - graft
     max_files: 5000           # files visited per walked root
-    max_file_bytes: 1048576   # larger files are skipped (never read)
+    max_file_bytes: 1048576   # larger files are skipped (never read); also the budget read limit
     memory_results: 5         # memory search hits (only when memory.enabled)
   classification:
     # Deterministic rules always run first and are never overridden. Candidates
@@ -41,3 +42,26 @@ context:
     # the threshold or on provider failure -> conservative fallback: OPTIONAL.
     probabilistic: true
     max_decisions: 50         # decision calls per run; further candidates fall back
+  budget:
+    # Sizes are characters (Unicode code points of the loaded text), not tokens:
+    # provider-neutral and deterministic. 100k characters is roughly 25k tokens by
+    # the usual ~4 chars/token rule of thumb (documentation only, never computed):
+    # far below any current model window, on purpose.
+    unit: characters
+    truncation: whole_item    # never cut an item: it fits whole or is skipped
+    total: 100000
+    reserve: 20000            # kept free for system prompt, task, output, tools
+                              # -> usable context: 80000
+    # Order: every REQUIRED item, then HIGH_VALUE, then OPTIONAL (EXCLUDED never).
+    # REQUIRED is never dropped: over `usable` -> status REQUIRED_OVERFLOW; over a
+    # category or max_* limit -> reported in `conflicts`. REQUIRED counts toward
+    # every limit, so it leaves less room for the rest.
+    categories:               # max characters per category (absent = only total)
+      library: 20000          # policies, guidelines, rules, skills, specialties
+      adrs: 15000
+      documentation: 25000    # docs are the largest and most often OPTIONAL
+      source_code: 40000
+      memory: 2000            # auxiliary: 5 excerpts of <= 280 chars fit
+    max_files: 20             # project files (instructions, ADRs, docs, source)
+    max_adrs: 5
+    max_memories: 5

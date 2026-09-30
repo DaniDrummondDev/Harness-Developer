@@ -1,4 +1,4 @@
-# Architecture — as built (V1.2)
+# Architecture — as built (V1.3)
 
 Target architecture: [`../../docs/03-ARCHITECTURE-AND-FOLDER-STRUCTURE.md`](../../docs/03-ARCHITECTURE-AND-FOLDER-STRUCTURE.md).
 This file records **what exists now** and the decisions taken to get here. Modules from
@@ -9,7 +9,7 @@ the target tree are created only when a version needs them.
 | Module | Responsibility | Depends on |
 |---|---|---|
 | `orchestrator/__main__.py` | `python -m orchestrator` entry point | `cli` |
-| `orchestrator/cli.py` | Typer app: root command (identity + help), global options (`--root`, `--log-level`, `--version`), `doctor`, `intake`, **V0.3** `memory` (health/add/search/update/delete) , **V0.4** `decision` (classify/route/severity/relevance/health) , **V1** `library` (inspect/resolve), **V1.1** `context discover` and **V1.2** `context classify` commands, rendering | `doctor`, `config`, `intake`, `core.admission`, `memory.service`, `decisions.service`, `library.*`, `context.discovery`, `context.classification.classifier`, `utils.logging` |
+| `orchestrator/cli.py` | Typer app: root command (identity + help), global options (`--root`, `--log-level`, `--version`), `doctor`, `intake`, **V0.3** `memory` (health/add/search/update/delete) , **V0.4** `decision` (classify/route/severity/relevance/health) , **V1** `library` (inspect/resolve), **V1.1** `context discover`, **V1.2** `context classify` and **V1.3** `context budget` commands, rendering | `doctor`, `config`, `intake`, `core.admission`, `memory.service`, `decisions.service`, `library.*`, `context.discovery`, `context.classification.classifier`, `context.budget.budgeter`, `utils.logging` |
 | `orchestrator/library/models.py` | **V1** Global Library contracts: `ArtifactType`, `Authority` (fixed per type), `PRECEDENCE`, `DIRECTORY_BY_TYPE`, `AppliesTo`, `ArtifactMetadata`/`SpecialtyMetadata` (schema v1), `Artifact`, `ProjectProfile`, `Match` | — (Pydantic only) |
 | `orchestrator/library/loader.py` | **V1** `resolve_library_root` (explicit > `$HARNESS_LIBRARY_ROOT` > installation dir); discover → read → parse (front matter) → validate, with path-escape, size and file-type guards | `library.models`, `config` (`default_harness_root` only), `utils.files`, `utils.yaml_loader`, `core.exceptions` |
 | `orchestrator/library/library.py` | **V1** `GlobalLibrary`: index (duplicate ids), reference checks, `artifacts`/`by_type`/`get`, deterministic `resolve(profile)` | `library.loader`, `library.models`, `core.exceptions` |
@@ -21,6 +21,9 @@ the target tree are created only when a version needs them.
 | `orchestrator/context/classification/deterministic.py` | **V1.2** `ClassificationRule`, `DEFAULT_RULES` (ordered, first match wins), `DeterministicClassifier` | `classification.models`, `context.models`, `library.models` (`Authority`) |
 | `orchestrator/context/classification/probabilistic.py` | **V1.2** `Decider` protocol, `decision_subject` (minimal safe input), `ProbabilisticClassifier` (outcome → class/fallback, per-run stop on provider failure, `max_decisions`) | `classification.models`, `decisions.models`, `providers.base`, `memory.safety` |
 | `orchestrator/context/classification/classifier.py` | **V1.2** `ContextClassifier` (deterministic → decider → fallback), `build_classifier(config, decider=...)` | `config`, `classification.*`, `context.models` |
+| `orchestrator/context/budget/models.py` | **V1.3** `BudgetCategory` (+ `CATEGORY_BY_KIND`), `BudgetStatus`, `BudgetReason`, `BudgetedItem` (wraps the classified candidate), `LimitConflict`, `BudgetUsage`, `ContextBudgetResult` (+ invariants: REQUIRED never left out for budget, EXCLUDED never selected, usage/status derived) | `config` (`BudgetSection`), `classification.models`, `context.models`, `core.request` |
+| `orchestrator/context/budget/content.py` | **V1.3** `ContentLoader` protocol, `ContextContentLoader`: reference → safe text (project file via `ProjectFiles.check_file` + bounded read + binary/UTF-8 checks; library body via `GlobalLibrary.get`; memory excerpt) | `context.files`, `context.models`, `library`, `core.exceptions` |
+| `orchestrator/context/budget/budgeter.py` | **V1.3** `ContextBudgeter` (REQUIRED → HIGH_VALUE → OPTIONAL, whole items, first fit; EXCLUDED never), `priority_key`, `build_budgeter(config, library)` | `config`, `budget.*`, `classification.models`, `context.discovery` (`project_files`), `context.models`, `library` |
 | `orchestrator/utils/yaml_loader.py` | **V1** (extracted from `config.py`) safe YAML parsing that rejects duplicate keys; shared by config and library | — (PyYAML only) |
 | `orchestrator/doctor.py` | Deterministic checks, aggregation (worst status wins), exit code; **V0.3** opt-in `memory` check; **V0.4** opt-in `decisions` check | `config`, `utils.shell`, `memory.service`, `decisions.service` |
 | `orchestrator/config.py` | Harness-root resolution, YAML parsing, Pydantic schemas, cross-file checks, `HarnessConfig` (incl. `enabled_modes`) | `utils.files`, `core.exceptions`, `core.request` |
@@ -63,7 +66,11 @@ searches memory only through the `MemorySearcher` protocol, so opening memory st
 `cli.py`/`doctor.py` (guarded by `tests/unit/test_context_discovery.py`). V1.2: only
 `context/classification/probabilistic.py` imports the decision layer's *contracts*
 (`decisions.models`, `providers.base`) and reaches Jev through the `Decider` protocol;
-`open_decisions` stays in `cli.py` (same guard).
+`open_decisions` stays in `cli.py` (same guard). V1.3: `context/budget/` follows the
+same rules (no CLI, doctor, providers, decisions, network); earlier stages never import
+later ones (discovery ↛ classification/budget, classification ↛ budget), and the budget
+reads the library only to get an artifact body (guards in `test_context_discovery.py`,
+`test_library_isolation.py`).
 
 ## Main flows
 
@@ -86,6 +93,7 @@ resolve_harness_root(--root | $HARNESS_ROOT | package dir)   -> HarnessPathError
 python → harness_root → [permissions, config_files, config_valid, structure, memory*, decisions**, context****] → library*** → git → [git_repository]
 **** context (V1.1): only when context.enabled — validates discovery paths (escape = FAIL), never discovers
      + classification (V1.2): structural strategy report; WARN if probabilistic without decisions.model; no call
+     + budget (V1.3): structural budget report; WARN if a category limit >= usable; never loads content
                          (only if root found)                                                                          (only if git + config ok)
 *** library (V1): always, offline, independent of the harness root — load errors FAIL, empty library WARN
 * memory: only when memory.yaml has enabled: true — healthy PASS, unavailable WARN, misconfigured FAIL
@@ -269,7 +277,34 @@ harness context classify "<instruction>" [--intent] [--ref]
     counts, decisions (by selected_by), warnings (discovery + classification)
 ```
 
-No budget, truncation, prompt selection or LLM (V1.3+).
+No budget, truncation, prompt selection or LLM here (budget: V1.3, below).
+
+**Context Budget (V1.3)**
+
+```text
+harness context budget "<instruction>" [--intent] [--ref] [--content]
+  (same discovery + classification as above; the library is loaded once and shared)
+  build_budgeter(config, library): context.yaml budget + ContextContentLoader(ProjectFiles, library)
+  ContextBudgeter.budget(classification), candidates sorted by priority_key:
+    (class, deterministic < probabilistic < fallback, -confidence if probabilistic, kind, id)
+    1. every REQUIRED: load
+         no content (missing/binary/non-UTF-8/secret/too large/outside) ─> not_selected
+                                     content_unavailable → status REQUIRED_UNAVAILABLE
+         else ─> selected `required` (never limited by categories or max_*)
+       REQUIRED usage > usable ─────> status REQUIRED_OVERFLOW (all REQUIRED kept)
+       REQUIRED usage > category/max_* limit ─> `conflicts` (+ warning), kept
+    2. HIGH_VALUE, then OPTIONAL, one by one (first fit, whole items):
+         overflow ─> required_overflow · max_adrs/max_files/max_memories ─> *_reached
+         (both before loading) · load failed ─> content_unavailable · size > usable or
+         category limit ─> item_too_large · > usable remainder ─> total_budget_exhausted ·
+         > category remainder ─> category_budget_exhausted · else selected within_budget
+    3. EXCLUDED ─> excluded_by_classification (never loaded)
+  ContextBudgetResult.build: usage (total, reserve, usable, used, remaining, overflow,
+    by_category, files, adrs, memories) and status derived and validated
+  CLI: JSON without item text unless --content; exit 0 SUCCESS, 3 otherwise
+```
+
+No Jev, no LLM, no reclassification, no truncation, no prompt rendering.
 
 ## Decisions (V0)
 
@@ -431,6 +466,28 @@ Rationale and alternatives: [`sprints/sprint-v1.2.md`](sprints/sprint-v1.2.md).
 9. **Dedup keeps all metadata** (conflicts recorded) and `Provenance.match` makes
    explicit references structured.
 
+## Decisions (V1.3)
+
+Rationale and alternatives: [`sprints/sprint-v1.3.md`](sprints/sprint-v1.3.md).
+
+1. **Characters, not tokens**: `len` of the loaded text (code points); no tokenizer,
+   provider-neutral, exact. Bytes (`stat`) are a safety bound, never the measure.
+2. **One reserve** (`usable = total − reserve`), not a model of every future prompt part.
+3. **Classification is the authority**: priority is class first; within a class only
+   signals V1.2 produced (selector, probabilistic confidence), then kind, then id.
+4. **Whole items, first fit**: never truncated; a skipped item does not stop the scan.
+5. **REQUIRED is never dropped**: over `usable` → `REQUIRED_OVERFLOW`; unloadable →
+   `REQUIRED_UNAVAILABLE`; over a category/max_* limit → recorded `conflicts`.
+   Invariants live in the models, not only in the engine.
+6. **Six categories** (library, instructions, adrs, documentation, source_code, memory),
+   one per real source family; the library is one bucket (authority is already in the class).
+7. **Lazy, safe materialization** (`ContextContentLoader`): reuses `ProjectFiles` rules and
+   the already-loaded library body; memory uses its excerpt (no `MemoryProvider` change).
+8. **Budget decision is a separate layer**: items wrap the classified candidate; the
+   classification reason is never overwritten; every candidate lands in exactly one list.
+9. **CLI exit 3** for REQUIRED_OVERFLOW / REQUIRED_UNAVAILABLE (escalation needed; the
+   JSON is still printed), mirroring `decision`'s fallback exit code.
+
 ## Where to change things
 
 - New CLI command → `cli.py` (`@app.command()`), logic in its own module.
@@ -488,3 +545,9 @@ Rationale and alternatives: [`sprints/sprint-v1.2.md`](sprints/sprint-v1.2.md).
 - Jev question/rubric/input allowlist → `QUESTION`, `DESCRIPTIONS`, `SAFE_METADATA` in
   `classification/probabilistic.py`. Fallback class → `FALLBACK_CLASS` (models.py).
 - Classification options → `ClassificationSection` in `config.py` + `config/context.yaml`.
+- Budget sizes/limits → `config/context.yaml` `budget`; a new limit → `BudgetSection` /
+  `CategoryLimits` in `config.py` + its check in `budget/budgeter.py` + a `BudgetReason`.
+- New budget category → `BudgetCategory` + `CATEGORY_BY_KIND` (`budget/models.py`) + a
+  `CategoryLimits` field (a test keeps them equal).
+- New candidate store → a branch in `ContextContentLoader.load` (`budget/content.py`).
+- Selection order inside a class → `priority_key` (`budget/budgeter.py`).

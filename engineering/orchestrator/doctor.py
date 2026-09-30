@@ -43,6 +43,11 @@ discovery: that needs a request and belongs to `context discover`.
 WARN when probabilistic classification is requested but decisions.yaml has no
 model. It never classifies and never calls the decision provider.
 
+`budget` (V1.3) runs with `context`: structural and offline. It reports the
+budget `context budget` will apply (unit, total, reserve, usable, category and
+item limits); WARN when a category limit can never bind (>= usable). It never
+loads content, selects, reads the repository or calls a provider.
+
 To add a check: write `def check_x(...) -> CheckResult`, call it from
 `run_doctor`, and add a test in tests/unit/test_doctor.py.
 """
@@ -270,6 +275,25 @@ def check_classification(config: HarnessConfig) -> CheckResult:
     )
 
 
+def check_budget(config: HarnessConfig) -> CheckResult:
+    """Structural only: the budget `context budget` will apply (its invariants are
+    already enforced by config validation). Never loads content nor selects.
+    WARN when a category limit is >= the usable budget (it can never bind)."""
+    budget = config.context.budget
+    caps = {name: cap for name, cap in budget.categories.model_dump().items() if cap is not None}
+    detail = (
+        f"{budget.unit}, {budget.truncation}: total {budget.total} - reserve {budget.reserve} "
+        f"= usable {budget.usable}; categories "
+        f"{', '.join(f'{n} {c}' for n, c in caps.items()) or 'none'}; max_files "
+        f"{budget.max_files}, max_adrs {budget.max_adrs}, max_memories {budget.max_memories}"
+    )
+    ineffective = [name for name, cap in caps.items() if cap >= budget.usable]
+    if ineffective:
+        return CheckResult("budget", CheckStatus.WARN,
+                           f"{detail}; limit >= usable, never binding: {', '.join(ineffective)}")
+    return CheckResult("budget", CheckStatus.PASS, detail)
+
+
 def check_git_executable(runner: CommandRunner) -> tuple[CheckResult, bool]:
     try:
         result = runner(["git", "--version"], timeout=GIT_TIMEOUT_SECONDS)
@@ -368,6 +392,7 @@ def run_doctor(
             results.append(
                 _guarded("classification", lambda: check_classification(context_cfg))
             )
+            results.append(_guarded("budget", lambda: check_budget(context_cfg)))
 
     # Independent of the harness root: the library belongs to the installation.
     results.append(_guarded("library", lambda: check_library(library_root, environ)))

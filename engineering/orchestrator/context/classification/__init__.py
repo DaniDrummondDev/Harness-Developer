@@ -11,5 +11,5 @@ REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED, with who decided and why.
 
 Only `probabilistic.py` knows the decision layer, and only through its typed
 contracts (`decisions.models`, `providers.base`): no adapter, SDK or network.
-Nothing here budgets, truncates or selects context for a prompt (V1.3+).
+Nothing here budgets or selects context (that is `context/budget/`, V1.3).
 """

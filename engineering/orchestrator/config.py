@@ -199,10 +199,59 @@ class ClassificationSection(_StrictModel):
     max_decisions: int = Field(default=50, ge=1, le=500)
 
 
+CharacterLimit = Annotated[int, Field(ge=0, le=10_000_000)]
+
+
+class CategoryLimits(_StrictModel):
+    """Maximum characters per budget category (V1.3). None = only the total applies.
+
+    One field per `context.budget.models.BudgetCategory` (kept equal by a test).
+    REQUIRED items count toward a category but are never dropped by it."""
+
+    library: CharacterLimit | None = None
+    instructions: CharacterLimit | None = None
+    adrs: CharacterLimit | None = None
+    documentation: CharacterLimit | None = None
+    source_code: CharacterLimit | None = None
+    memory: CharacterLimit | None = None
+
+
+class BudgetSection(_StrictModel):
+    """Context Budget (V1.3). Sizes are characters (Unicode code points of the
+    loaded text), never tokens: provider-neutral and deterministic.
+
+    `usable = total - reserve`; the reserve keeps room for everything that is not
+    context (system prompt, task, instructions, output, tool metadata). Items are
+    selected whole (`truncation: whole_item`). `max_files` counts project files
+    (instructions, ADRs, docs, source), `max_adrs` ADRs (also files),
+    `max_memories` memory excerpts. Limits never remove REQUIRED items: a REQUIRED
+    set exceeding one is reported as a conflict (or REQUIRED_OVERFLOW for `usable`)."""
+
+    unit: Literal["characters"] = "characters"
+    truncation: Literal["whole_item"] = "whole_item"
+    total: int = Field(default=100_000, ge=1, le=10_000_000)
+    reserve: int = Field(default=20_000, ge=0)
+    categories: CategoryLimits = Field(default_factory=CategoryLimits)
+    max_files: int = Field(default=20, ge=0, le=10_000)
+    max_adrs: int = Field(default=5, ge=0, le=10_000)
+    max_memories: int = Field(default=5, ge=0, le=10_000)
+
+    @model_validator(mode="after")
+    def _reserve_leaves_room(self) -> Self:
+        if self.reserve >= self.total:
+            raise ValueError(f"reserve ({self.reserve}) must be smaller than total ({self.total})")
+        return self
+
+    @property
+    def usable(self) -> int:
+        return self.total - self.reserve
+
+
 class ContextSection(FeatureSection):
     # `enabled` gates Context Engineering (consumed by context.discovery since V1.1).
     discovery: DiscoverySection = Field(default_factory=DiscoverySection)
     classification: ClassificationSection = Field(default_factory=ClassificationSection)
+    budget: BudgetSection = Field(default_factory=BudgetSection)
 
 
 class ContextFile(_VersionedFile):

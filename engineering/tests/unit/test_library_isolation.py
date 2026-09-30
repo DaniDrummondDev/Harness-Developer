@@ -46,6 +46,8 @@ def test_core_does_not_depend_on_library() -> None:
 def test_only_interfaces_and_context_discovery_consume_the_library() -> None:
     # V1: CLI and doctor. V1.1: context discovery (library is a candidate source).
     # V1.2: deterministic classification reads the library's `Authority` vocabulary.
+    # V1.3: the budget's content loader reads an artifact body from the loaded
+    # library (never re-parsing files); the budgeter composition receives it.
     consumers = {
         str(path.relative_to(PACKAGE))
         for path in PACKAGE.rglob("*.py")
@@ -54,5 +56,6 @@ def test_only_interfaces_and_context_discovery_consume_the_library() -> None:
     }
     assert consumers == {
         "cli.py", "doctor.py", "context/discoverers.py", "context/discovery.py",
-        "context/classification/deterministic.py",
+        "context/classification/deterministic.py", "context/budget/content.py",
+        "context/budget/budgeter.py",
     }

@@ -539,6 +539,17 @@ def test_context_uses_no_execution_primitives() -> None:
         assert not calls & {"eval", "exec", "compile", "__import__"}, path
 
 
+def test_earlier_context_stages_never_import_later_ones() -> None:
+    """V1.1 discovery knows neither classification nor budget; V1.2 knows no budget (V1.3)."""
+    later = {
+        PACKAGE / "context": ("orchestrator.context.classification", "orchestrator.context.budget"),
+        PACKAGE / "context" / "classification": ("orchestrator.context.budget",),
+    }
+    for directory, forbidden in later.items():
+        for path in directory.glob("*.py"):
+            assert not {n for n in _imports(path) if n.startswith(forbidden)}, path
+
+
 def test_core_library_and_memory_do_not_depend_on_context() -> None:
     for package in ("core", "library", "memory"):
         for path in (PACKAGE / package).rglob("*.py"):

@@ -6,6 +6,9 @@ filesystem access), `models.py` (contracts). Discovery only finds; it never
 classifies.
 
 V1.2 Context Classification: `classification/` labels each discovered candidate
-REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED. Nothing here budgets or selects
-context for a prompt (V1.3+).
+REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED.
+
+V1.3 Context Budget: `budget/` selects, whole items only, the classified
+candidates that fit a character budget. Nothing here renders a prompt (V2+).
+Each stage consumes the previous one's result and never imports a later stage.
 """
