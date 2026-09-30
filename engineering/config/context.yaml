@@ -1,8 +1,10 @@
 # Context Engineering (V1.x). V1.1 Context Candidate Discovery lists sources that
 # MAY be relevant to a request; V1.2 Context Classification labels each one
 # REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED; V1.3 Context Budget selects, whole
-# items only, what fits. Nothing is rendered into a prompt yet (V2+).
-# `enabled` gates `context discover|classify|budget`.
+# items only, what fits; V1.4 LLM Context Escalation decides, deterministically,
+# whether a reasoning model must plan the context. Nothing is rendered into a
+# prompt yet (V2+).
+# `enabled` gates `context discover|classify|budget|plan`.
 #
 # Every path is relative to the project root (project.yaml `root`) and must stay
 # inside it; `..`, absolute paths and `~` are rejected. Discovery limits protect
@@ -10,7 +12,7 @@
 version: 1
 context:
   enabled: true
-  description: Candidate discovery (V1.1), classification (V1.2) and budget (V1.3).
+  description: Discovery (V1.1), classification (V1.2), budget (V1.3), escalation (V1.4).
   discovery:
     # Agent/project instruction files (only those that exist are listed).
     instruction_files:
@@ -65,3 +67,21 @@ context:
     max_files: 20             # project files (instructions, ADRs, docs, source)
     max_adrs: 5
     max_memories: 5
+  escalation:
+    # LLM Context Escalation (V1.4). After the budget, deterministic triggers decide
+    # whether the context needs a reasoning model; only then is the planner model
+    # asked for a ContextPlan, which is validated before use (it can never drop
+    # REQUIRED, select EXCLUDED, reclassify or hide an overflow). Without a trigger
+    # no LLM is called. On any planning failure the budget result stands.
+    enabled: true
+    # Logical alias in models.yaml (never a vendor model name). null = no planner:
+    # escalations are recorded (FAILED, planner_unavailable) and the budget result is
+    # used. No LLM adapter exists before V2.x, so the shipped value is null.
+    model: null
+    triggers:                   # [] / null disables a trigger
+      architectural_intents: [plan]   # declared --intent values that mean architecture
+      min_specialties: 3        # REQUIRED/HIGH_VALUE specialties -> multiple domains
+      max_high_value: 12        # more HIGH_VALUE candidates than this -> too many
+      min_low_confidence: 3     # decisions below minimum_confidence -> low confidence
+      # Always on (no threshold): source conflicts (discovery merge_conflicts),
+      # REQUIRED_OVERFLOW and REQUIRED_UNAVAILABLE.

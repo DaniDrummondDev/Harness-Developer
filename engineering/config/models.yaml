@@ -15,3 +15,6 @@ models:
 #   reasoning:
 #     provider: openai
 #     model_id: <model-id>
+#   context_planner:          # context.yaml escalation.model (V1.4); needs an LLM adapter
+#     provider: openai
+#     model_id: <reasoning-model-id>

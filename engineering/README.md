@@ -3,7 +3,7 @@
 Engineering control plane for LLM-assisted software delivery. The Harness governs the
 workflow; LLMs and other providers are pluggable components, never the sole authority.
 
-**Current version: V1.3 — Context Budget.** It provides only:
+**Current version: V1.4 — LLM Context Escalation.** It provides only:
 
 - CLI (`python -m orchestrator` / `harness`)
 - declarative configuration (`config/*.yaml`) with typed validation (Pydantic v2)
@@ -38,6 +38,13 @@ workflow; LLMs and other providers are pluggable components, never the sole auth
   every REQUIRED, then HIGH_VALUE, then OPTIONAL, EXCLUDED never; a REQUIRED set that
   does not fit is an explicit status, never silently dropped; `context budget` and a
   structural `budget` doctor check. Nothing is rendered into a prompt yet
+- **V1.4:** LLM Context Escalation — deterministic triggers decide whether the budget
+  result needs a reasoning model; only then is the planner model (a `models.yaml` alias,
+  through `LLMProvider`) asked for a `ContextPlan` built from safety-checked metadata, and
+  the plan is validated deterministically (REQUIRED kept, EXCLUDED never, no unknown ids,
+  no reclassification, budget respected). Any failure keeps the V1.3 result; without a
+  trigger no LLM is called. `context plan` and a structural `escalation` doctor check.
+  No LLM adapter exists yet (V2.x): planning itself runs only with a test provider
 
 Memory is auxiliary context, **never a source of truth** (docs, ADRs, policies, task
 contracts and Git win), and nothing writes it automatically. **Jev is probabilistic**:
@@ -370,6 +377,58 @@ the same rules as discovery (inside the project after resolving symlinks, no exc
 no secret-looking name, ≤ `max_file_bytes`), then NUL byte → binary, strict UTF-8; library
 artifacts from the already-loaded library (body only); memory from its ≤ 280-char excerpt.
 
+### LLM Context Escalation (V1.4)
+
+Answers *"does this request need extra reasoning to plan its context?"* — deterministically
+— and only when it does, *"which context should be prioritised within the existing
+constraints?"* — through the planner model, validated before use.
+
+```bash
+python -m orchestrator context plan "fix rounding in src/billing/invoice.py"
+# discover + classify + budget + escalation: {"summary": {...}, "budget": ..., "escalation": ...,
+#   "status": ..., "plan": ..., "constraints": ..., "call": ..., "llm_calls": ...}
+python -m orchestrator context plan "redesign the billing module" --intent plan
+# architectural intent -> escalation required. With the shipped config (no planner model)
+# the result is FAILED planner_unavailable and the deterministic budget result stands (exit 3)
+```
+
+**When the LLM is called**: only when at least one trigger fires (`context.yaml`
+`escalation.triggers`), escalation is `enabled`, a planner model is configured and
+openable, and the request text passes the safety check. **Never called** when no trigger
+fires (`llm_calls: 0`), when escalation is disabled, or when planning cannot start.
+
+| Trigger | Fires when | Setting |
+|---|---|---|
+| `architectural_task` | the declared `--intent` is in `architectural_intents` | `[plan]` (`[]` = off) |
+| `multiple_domains` | ≥ N specialties classified REQUIRED/HIGH_VALUE | `min_specialties: 3` |
+| `low_confidence` | ≥ N candidates Jev answered below `minimum_confidence` | `min_low_confidence: 3` |
+| `too_many_relevant_candidates` | more than N HIGH_VALUE candidates | `max_high_value: 12` |
+| `source_conflict` | a non-EXCLUDED candidate has discovery `merge_conflicts` | always |
+| `required_overflow` | REQUIRED alone exceeds `usable` | always |
+| `required_unavailable` | a REQUIRED item has no loadable content | always |
+
+High risk is **not** a trigger (no risk source exists before the risk engine, V9).
+
+`status`: `NOT_REQUIRED` (no trigger; budget result used), `PLANNED` (validated
+`plan`), `FAILED` (`failure_kind`: `planner_unavailable`, `unsafe_input`, `provider_error`,
+`invalid_output`; the budget result is used). `ContextPlan`:
+`selected_candidate_ids` (priority order, REQUIRED first), `rationale`, `added`/`dropped`
+(vs the budget), `used`/`usable`, `unresolved_constraints` (Harness ones — overflow,
+unavailable, source/limit conflicts, withheld — then the planner's), `suggestions` (never
+executed). `call`: model alias, provider, model id, duration, prompt/response sizes (never
+their text). Exit 0 when nothing is left open, 3 otherwise (the JSON is printed).
+
+**What is sent** to the planner: the request's intent/mode/source/instruction, the budget
+limits and usage, the escalation reasons, per candidate id/kind/title/class/selected_by/
+evidence/confidence/category/size/budget reason/role/conflicts, and the Harness
+constraints. **Never sent**: candidate content, library descriptions, memory excerpts,
+request ids, `origin_ref`. A candidate whose metadata looks secret (safe-ingestion rules)
+or whose path has a secret-looking name (`.env`, keys, credentials) is withheld and
+recorded; a secret-looking instruction or prompt cancels the call (`unsafe_input`).
+
+To plan for real, an LLM adapter (V2.x) must exist: declare an alias in `models.yaml`
+whose provider has one and set `context.yaml` `escalation.model` to it.
+
 ### Harness root resolution
 
 The harness root is the folder containing `config/`. It is resolved **without depending on
@@ -396,7 +455,7 @@ All ten files are **required**, carry `version: 1`, and reject unknown keys.
 | `models.yaml` | logical alias → `provider` + vendor `model_id` (`decision` → jev) | each `provider` exists in `providers.yaml` |
 | `agents.yaml` | roles, `model: null` | each non-null `model` exists in `models.yaml` |
 | `modes.yaml` | `interactive` (enabled), `autonomous` (disabled) | exactly these two modes, both declared; `enabled` gates request admission |
-| `context.yaml` | `enabled` (true; gates `context discover`/`classify`/`budget`), `discovery`: `instruction_files`, `documentation_paths`, `adr_paths`, `source_roots`, `exclude_dirs`, `max_files`, `max_file_bytes`, `memory_results` (V1.1); `classification`: `probabilistic` (true), `max_decisions` (50) (V1.2; the threshold is decisions.yaml's); `budget` (V1.3): `unit: characters`, `truncation: whole_item`, `total` (100000), `reserve` (20000), `categories` (library 20000, adrs 15000, documentation 25000, source_code 40000, memory 2000; instructions none), `max_files` (20), `max_adrs` (5), `max_memories` (5) | paths relative POSIX, no `..`/absolute/`~`, normalized; limits bounded; `total ≥ 1`, `0 ≤ reserve < total`, limits `≥ 0`; unknown keys (and categories) rejected |
+| `context.yaml` | `enabled` (true; gates `context discover`/`classify`/`budget`/`plan`), `discovery`: `instruction_files`, `documentation_paths`, `adr_paths`, `source_roots`, `exclude_dirs`, `max_files`, `max_file_bytes`, `memory_results` (V1.1); `classification`: `probabilistic` (true), `max_decisions` (50) (V1.2; the threshold is decisions.yaml's); `budget` (V1.3): `unit: characters`, `truncation: whole_item`, `total` (100000), `reserve` (20000), `categories` (library 20000, adrs 15000, documentation 25000, source_code 40000, memory 2000; instructions none), `max_files` (20), `max_adrs` (5), `max_memories` (5); `escalation` (V1.4): `enabled` (true), `model` (null; a `models.yaml` alias), `triggers`: `architectural_intents` ([plan]), `min_specialties` (3), `max_high_value` (12), `min_low_confidence` (3) | `escalation.model` must be declared in models.yaml; intents unique, never `unclassified`; thresholds bounded or null; paths relative POSIX, no `..`/absolute/`~`, normalized; limits bounded; `total ≥ 1`, `0 ≤ reserve < total`, limits `≥ 0`; unknown keys (and categories) rejected |
 | `memory.yaml` | `enabled` (false), `backend: mem0`, `mem0: {base_url, api_key_env, timeout_seconds}` | `enabled` requires `backend`; `mem0` backend requires its section; http(s) URL; env var name; no key values |
 | `decisions.yaml` | escalation order; `model` alias + `thresholds.minimum_confidence` (V0.4) | starts with `deterministic`, no repeats, `human` last; `model` exists in `models.yaml`; `model` requires `thresholds`; threshold in 0..1 |
 | `risks.yaml` | LOW → CRITICAL, default | unique levels, default is a known level |
@@ -451,6 +510,7 @@ or API key is ever needed outside the opt-in live tests.
 | `context` (only if `context.enabled`; validates paths, never discovers) | a discovery path resolves outside the project | — (absent optional paths are listed in the PASS detail) |
 | `classification` (with `context`; structural, offline, never classifies) | — | `probabilistic: true` but decisions.yaml has no model |
 | `budget` (with `context`; structural, offline, never loads content or selects) | — (invalid budget config already fails `config_valid`) | a category limit ≥ usable (it can never bind) |
+| `escalation` (with `context`; structural, offline, never opens an adapter or plans) | the planner alias points to a decision-only provider (jev) | the planner provider is enabled but has no LLM adapter yet (V2.x) |
 
 ## Layout
 
@@ -471,7 +531,8 @@ engineering/
 │   ├── library/           # V1: Global Library models, loader, GlobalLibrary (resolve)
 │   ├── context/           # V1.1: candidate models, safe file access, discoverers, discovery
 │   │   ├── classification/ # V1.2: models, deterministic rules, Jev classifier, composition
-│   │   └── budget/        # V1.3: models, content loader, budgeter (selection policy)
+│   │   ├── budget/        # V1.3: models, content loader, budgeter (selection policy)
+│   │   └── escalation/    # V1.4: triggers, safe planner input, plan validation, planner
 │   └── utils/             # shell.py, files.py, logging.py, yaml_loader.py
 ├── config/                # project-specific declarative configuration
 ├── policies/              # V1 Global Library content (shared by every project):
@@ -508,3 +569,7 @@ mypy                      # strict type checking of orchestrator/
   | .[] | [.classified.classification.classification, .reason, .size,
   .classified.candidate.id]'` answers "in or out, and why" per candidate; `.usage` and
   `.conflicts` explain the totals; `harness doctor` shows the budget in effect.
+- Escalation: `harness context plan "..." | jq .summary` answers "escalated? why? who
+  planned? what is open?"; `.escalation.evidence` gives each trigger's observed value,
+  threshold and candidates; `.failure_kind`/`.failure` say why planning failed;
+  `--log-level INFO` logs the plan size or the failure kind (never prompt or output).

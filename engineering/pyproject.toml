@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ai-engineering-harness"
 dynamic = ["version"]
-description = "AI Engineering Harness — engineering control plane (V1.3: context budget)."
+description = "AI Engineering Harness — engineering control plane (V1.4: LLM context escalation)."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

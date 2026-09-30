@@ -46,7 +46,7 @@ from orchestrator.core.exceptions import (
     ConfigValidationError,
     HarnessPathError,
 )
-from orchestrator.core.request import ExecutionMode
+from orchestrator.core.request import ExecutionMode, Intent
 from orchestrator.utils.files import read_text, require_directory, resolve_path
 from orchestrator.utils.yaml_loader import load_yaml
 
@@ -247,11 +247,47 @@ class BudgetSection(_StrictModel):
         return self.total - self.reserve
 
 
+class EscalationTriggers(_StrictModel):
+    """Deterministic escalation thresholds (V1.4). `[]` / None disables a trigger.
+
+    REQUIRED_OVERFLOW, REQUIRED_UNAVAILABLE and source conflicts have no
+    threshold: they are objective problems and always escalate."""
+
+    # Declared intents that mean architectural work (Intent.PLAN = Architect).
+    architectural_intents: list[Intent] = Field(default_factory=lambda: [Intent.PLAN])
+    # Distinct REQUIRED/HIGH_VALUE specialties that make a request multi-domain.
+    min_specialties: int | None = Field(default=3, ge=2, le=100)
+    # More HIGH_VALUE candidates than this makes selection complex.
+    max_high_value: int | None = Field(default=12, ge=1, le=10_000)
+    # Candidates the decision layer answered below its threshold (low confidence).
+    min_low_confidence: int | None = Field(default=3, ge=1, le=10_000)
+
+    @model_validator(mode="after")
+    def _intents_are_signals(self) -> Self:
+        if len(set(self.architectural_intents)) != len(self.architectural_intents):
+            raise ValueError("architectural_intents must not repeat")
+        if Intent.UNCLASSIFIED in self.architectural_intents:
+            raise ValueError("'unclassified' is the absence of an intent, not a signal")
+        return self
+
+
+class EscalationSection(_StrictModel):
+    """LLM Context Escalation (V1.4). Triggers are evaluated deterministically after
+    the budget; only when one fires is the planner model (a logical alias in
+    models.yaml, used through LLMProvider) asked for a ContextPlan. None = no
+    planner configured: escalations are recorded and the budget result is kept."""
+
+    enabled: bool = True
+    model: Identifier | None = None
+    triggers: EscalationTriggers = Field(default_factory=EscalationTriggers)
+
+
 class ContextSection(FeatureSection):
     # `enabled` gates Context Engineering (consumed by context.discovery since V1.1).
     discovery: DiscoverySection = Field(default_factory=DiscoverySection)
     classification: ClassificationSection = Field(default_factory=ClassificationSection)
     budget: BudgetSection = Field(default_factory=BudgetSection)
+    escalation: EscalationSection = Field(default_factory=EscalationSection)
 
 
 class ContextFile(_VersionedFile):
@@ -469,7 +505,7 @@ def load_config_file[T: _VersionedFile](path: Path, model: type[T]) -> T:
 
 
 def _check_references(config_dir: Path, providers: ProvidersFile, models: ModelsFile,
-                      agents: AgentsFile, decisions: DecisionsFile) -> None:
+                      agents: AgentsFile, decisions: DecisionsFile, context: ContextFile) -> None:
     for alias, model in models.models.items():
         if model.provider not in providers.providers:
             raise ConfigValidationError(
@@ -487,6 +523,12 @@ def _check_references(config_dir: Path, providers: ProvidersFile, models: Models
         raise ConfigValidationError(
             f"decisions.model '{decision_model}' is not declared in models.yaml",
             path=config_dir / "decisions.yaml",
+        )
+    planner_model = context.context.escalation.model
+    if planner_model is not None and planner_model not in models.models:
+        raise ConfigValidationError(
+            f"context.escalation.model '{planner_model}' is not declared in models.yaml",
+            path=config_dir / "context.yaml",
         )
 
 
@@ -510,7 +552,7 @@ def load_config(harness_root: Path) -> HarnessConfig:
     risks = load_config_file(config_dir / "risks.yaml", RisksFile)
     pipelines = load_config_file(config_dir / "pipelines.yaml", PipelinesFile)
 
-    _check_references(config_dir, providers, models, agents, decisions)
+    _check_references(config_dir, providers, models, agents, decisions, context)
 
     project_root = resolve_path(harness_root, project.project.root)
     if not project_root.is_dir():

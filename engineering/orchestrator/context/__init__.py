@@ -9,6 +9,10 @@ V1.2 Context Classification: `classification/` labels each discovered candidate
 REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED.
 
 V1.3 Context Budget: `budget/` selects, whole items only, the classified
-candidates that fit a character budget. Nothing here renders a prompt (V2+).
+candidates that fit a character budget.
+
+V1.4 LLM Context Escalation: `escalation/` decides deterministically whether the
+budget result needs a reasoning model and, only then, asks the planner model for a
+validated `ContextPlan`. Nothing here renders an agent prompt (V2+).
 Each stage consumes the previous one's result and never imports a later stage.
 """

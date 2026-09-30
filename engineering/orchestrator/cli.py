@@ -29,13 +29,19 @@ Output conventions:
   JSON (selected items' text only with `--content`); exit 0 on SUCCESS, 3 on
   REQUIRED_OVERFLOW / REQUIRED_UNAVAILABLE (a result that needs escalation, not an
   error); same errors as discover;
+- `context plan` (V1.4): discover + classify + budget + escalation, JSON with a
+  `summary` and the ContextEscalationResult (budget kept, escalation decision,
+  optional validated ContextPlan). The LLM is called only when a trigger fires.
+  Exit 0 when nothing is left open (NOT_REQUIRED with a SUCCESS budget, or PLANNED
+  without unresolved constraints); 3 when planning FAILED or a constraint remains
+  (not an error: the deterministic result is in the JSON); same errors as discover;
 - usage errors (unknown command/option, bad --log-level) -> Typer/Click, exit 2.
 
 Commands: root (identity + help), `doctor` (V0), `intake` (V0.1), the
 `memory` group (V0.3: health, add, search, update, delete), the `decision`
 group (V0.4: classify, route, severity, relevance, health) and the `library`
 group (V1: inspect, resolve) and the `context` group (V1.1: discover; V1.2: classify;
-V1.3: budget). New
+V1.3: budget; V1.4: plan). New
 commands are added as `@app.command()` functions here, delegating logic to
 their own module.
 """
@@ -59,6 +65,12 @@ from orchestrator.context.budget.models import BudgetStatus
 from orchestrator.context.classification.classifier import build_classifier
 from orchestrator.context.classification.models import ContextClassificationResult
 from orchestrator.context.discovery import build_discovery
+from orchestrator.context.escalation.models import PlanStatus
+from orchestrator.context.escalation.planner import (
+    ContextPlanner,
+    build_escalation,
+    open_context_planner,
+)
 from orchestrator.context.models import ContextDiscoveryResult
 from orchestrator.core.admission import admit
 from orchestrator.core.exceptions import HarnessError
@@ -123,7 +135,7 @@ def root_command(
         ),
     ] = False,
 ) -> None:
-    """AI Engineering Harness — engineering control plane (V1.3 context budget)."""
+    """AI Engineering Harness — engineering control plane (V1.4 context escalation)."""
     try:
         configure_logging(log_level)
     except ValueError as exc:
@@ -515,7 +527,9 @@ context_app = typer.Typer(
     "`classify` (V1.2) labels each REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED "
     "(deterministic rules first, then Jev if enabled, else a conservative fallback); "
     "`budget` (V1.3) selects, whole items only, what fits the character budget "
-    "(REQUIRED always; never rendered into a prompt).",
+    "(REQUIRED always; never rendered into a prompt); `plan` (V1.4) evaluates "
+    "deterministic escalation triggers and, only when one fires, asks the planner "
+    "model for a validated ContextPlan.",
     no_args_is_help=True,
     rich_markup_mode=None,
 )
@@ -630,6 +644,48 @@ def context_budget(
         _fail(exc)
     _echo_json(result.model_dump(mode="json", exclude=None if content else _WITHOUT_CONTENT))
     raise typer.Exit(code=0 if result.status is BudgetStatus.SUCCESS else EXIT_REQUIRED_CONFLICT)
+
+
+def _planner_for_context(config: HarnessConfig) -> tuple[ContextPlanner | None, str | None]:
+    """The planner is optional: when it cannot be opened (no model, provider disabled,
+    no LLM adapter), an escalation is recorded as FAILED and the budget result stands."""
+    if not config.context.escalation.enabled:
+        return None, None
+    try:
+        return open_context_planner(config), None
+    except HarnessError as exc:
+        return None, str(exc)
+
+
+@context_app.command("plan")
+def context_plan(
+    ctx: typer.Context, instruction: _InstructionArg, intent: _IntentOpt = None,
+    ref: _RefOpt = None,
+    content: Annotated[
+        bool, typer.Option("--content", help="Include the text of the budget's selected items.")
+    ] = False,
+) -> None:
+    """Discover, classify, budget, then evaluate escalation (context.yaml `escalation`);
+    only when a trigger fires is the planner model asked for a validated ContextPlan.
+    JSON: `summary` + the full result. Exit 0 when nothing is left open, 3 when planning
+    failed, a constraint is unresolved or the budget needs escalation."""
+    state: CliState = ctx.find_root().obj
+    try:
+        config = load_config(resolve_harness_root(state.root))
+        library = _load_library()
+        classified = _classify(config, _discover(config, library, instruction, intent, ref))
+        budget = build_budgeter(config, library).budget(classified)
+        planner, planner_error = _planner_for_context(config)
+        result = build_escalation(
+            config, planner=planner, planner_unavailable=planner_error
+        ).escalate(budget)
+    except HarnessError as exc:
+        _fail(exc)
+    exclude = None if content else {"budget": _WITHOUT_CONTENT}
+    _echo_json({"summary": result.summary(), **result.model_dump(mode="json", exclude=exclude)})
+    settled = result.status is not PlanStatus.FAILED and not result.unresolved_constraints and (
+        result.status is PlanStatus.PLANNED or budget.status is BudgetStatus.SUCCESS)
+    raise typer.Exit(code=0 if settled else EXIT_REQUIRED_CONFLICT)
 
 
 def main() -> None:

@@ -1,4 +1,4 @@
-# Architecture — as built (V1.3)
+# Architecture — as built (V1.4)
 
 Target architecture: [`../../docs/03-ARCHITECTURE-AND-FOLDER-STRUCTURE.md`](../../docs/03-ARCHITECTURE-AND-FOLDER-STRUCTURE.md).
 This file records **what exists now** and the decisions taken to get here. Modules from
@@ -9,7 +9,7 @@ the target tree are created only when a version needs them.
 | Module | Responsibility | Depends on |
 |---|---|---|
 | `orchestrator/__main__.py` | `python -m orchestrator` entry point | `cli` |
-| `orchestrator/cli.py` | Typer app: root command (identity + help), global options (`--root`, `--log-level`, `--version`), `doctor`, `intake`, **V0.3** `memory` (health/add/search/update/delete) , **V0.4** `decision` (classify/route/severity/relevance/health) , **V1** `library` (inspect/resolve), **V1.1** `context discover`, **V1.2** `context classify` and **V1.3** `context budget` commands, rendering | `doctor`, `config`, `intake`, `core.admission`, `memory.service`, `decisions.service`, `library.*`, `context.discovery`, `context.classification.classifier`, `context.budget.budgeter`, `utils.logging` |
+| `orchestrator/cli.py` | Typer app: root command (identity + help), global options (`--root`, `--log-level`, `--version`), `doctor`, `intake`, **V0.3** `memory` (health/add/search/update/delete) , **V0.4** `decision` (classify/route/severity/relevance/health) , **V1** `library` (inspect/resolve), **V1.1** `context discover`, **V1.2** `context classify`, **V1.3** `context budget` and **V1.4** `context plan` commands, rendering | `doctor`, `config`, `intake`, `core.admission`, `memory.service`, `decisions.service`, `library.*`, `context.discovery`, `context.classification.classifier`, `context.budget.budgeter`, `context.escalation.planner`, `utils.logging` |
 | `orchestrator/library/models.py` | **V1** Global Library contracts: `ArtifactType`, `Authority` (fixed per type), `PRECEDENCE`, `DIRECTORY_BY_TYPE`, `AppliesTo`, `ArtifactMetadata`/`SpecialtyMetadata` (schema v1), `Artifact`, `ProjectProfile`, `Match` | — (Pydantic only) |
 | `orchestrator/library/loader.py` | **V1** `resolve_library_root` (explicit > `$HARNESS_LIBRARY_ROOT` > installation dir); discover → read → parse (front matter) → validate, with path-escape, size and file-type guards | `library.models`, `config` (`default_harness_root` only), `utils.files`, `utils.yaml_loader`, `core.exceptions` |
 | `orchestrator/library/library.py` | **V1** `GlobalLibrary`: index (duplicate ids), reference checks, `artifacts`/`by_type`/`get`, deterministic `resolve(profile)` | `library.loader`, `library.models`, `core.exceptions` |
@@ -24,8 +24,14 @@ the target tree are created only when a version needs them.
 | `orchestrator/context/budget/models.py` | **V1.3** `BudgetCategory` (+ `CATEGORY_BY_KIND`), `BudgetStatus`, `BudgetReason`, `BudgetedItem` (wraps the classified candidate), `LimitConflict`, `BudgetUsage`, `ContextBudgetResult` (+ invariants: REQUIRED never left out for budget, EXCLUDED never selected, usage/status derived) | `config` (`BudgetSection`), `classification.models`, `context.models`, `core.request` |
 | `orchestrator/context/budget/content.py` | **V1.3** `ContentLoader` protocol, `ContextContentLoader`: reference → safe text (project file via `ProjectFiles.check_file` + bounded read + binary/UTF-8 checks; library body via `GlobalLibrary.get`; memory excerpt) | `context.files`, `context.models`, `library`, `core.exceptions` |
 | `orchestrator/context/budget/budgeter.py` | **V1.3** `ContextBudgeter` (REQUIRED → HIGH_VALUE → OPTIONAL, whole items, first fit; EXCLUDED never), `priority_key`, `build_budgeter(config, library)` | `config`, `budget.*`, `classification.models`, `context.discovery` (`project_files`), `context.models`, `library` |
+| `orchestrator/context/escalation/models.py` | **V1.4** `EscalationReason`, `EscalationEvidence`, `ContextEscalationDecision`, `ConstraintKind`, `UnresolvedConstraint`, `ContextPlan`, `PlanningFailure`, `PlannerCall`, `PlanStatus`, `ContextEscalationResult` (+ invariants: plan validated against the budget, Harness constraints never hidden, status/plan/failure/calls consistent) | `budget.models`, `escalation.invariants` |
+| `orchestrator/context/escalation/invariants.py` | **V1.4** `PlanningRole`, `planning_role`, `plan_violations` (REQUIRED kept, nothing unavailable/excluded/unmeasured, budget replay), `plan_size` | `budget.models`, `classification.models`, `context.models` |
+| `orchestrator/context/escalation/evaluator.py` | **V1.4** `EscalationEvaluator`: deterministic triggers over `ContextBudgetResult` | `config` (`EscalationSection`), `budget.models`, `classification.models`, `escalation.models`, `context.models` |
+| `orchestrator/context/escalation/planning.py` | **V1.4** `ContextPlanningInput` (allow-listed, metadata only), `harness_constraints`, `prepare_input` (withholding via `memory.safety` + `is_secret_name`), `render_prompt` | `budget.models`, `escalation.*`, `context.files`, `context.models`, `memory.safety` |
+| `orchestrator/context/escalation/validation.py` | **V1.4** `PlannerResponse` (strict schema), `parse_response`, `validate_plan` → `ContextPlan`, `InvalidPlanError` | `budget.models`, `escalation.*` |
+| `orchestrator/context/escalation/planner.py` | **V1.4** `ContextPlanner` (LLMProvider call, fallback on failure), `ContextEscalation` (evaluate → maybe plan), `build_llm_adapter`, `open_context_planner(config, registry)`, `build_escalation(config, planner=…)`, `LLM_ADAPTER_KINDS`/`DECISION_ONLY_KINDS` | `config`, `escalation.*`, `memory.safety`, `providers.base/registry/resolution`, `core.exceptions` |
 | `orchestrator/utils/yaml_loader.py` | **V1** (extracted from `config.py`) safe YAML parsing that rejects duplicate keys; shared by config and library | — (PyYAML only) |
-| `orchestrator/doctor.py` | Deterministic checks, aggregation (worst status wins), exit code; **V0.3** opt-in `memory` check; **V0.4** opt-in `decisions` check | `config`, `utils.shell`, `memory.service`, `decisions.service` |
+| `orchestrator/doctor.py` | Deterministic checks, aggregation (worst status wins), exit code; **V0.3** opt-in `memory` check; **V0.4** opt-in `decisions` check; **V1.1–V1.4** structural `context`, `classification`, `budget`, `escalation` checks | `config`, `utils.shell`, `memory.service`, `decisions.service`, `context.discovery`, `context.escalation.planner` (adapter-kind constants only) |
 | `orchestrator/config.py` | Harness-root resolution, YAML parsing, Pydantic schemas, cross-file checks, `HarnessConfig` (incl. `enabled_modes`) | `utils.files`, `core.exceptions`, `core.request` |
 | `orchestrator/intake.py` | **V0.1** Normalization: raw strings from any origin → `EngineeringRequest` | `core.request`, `core.exceptions` |
 | `orchestrator/core/request.py` | **V0.1** Domain contracts: `ExecutionMode`, `RequestSource`, `Intent`, `WorkflowState`, `SOURCES_BY_MODE`, `EngineeringRequest`, `AdmittedRequest` | — (Pydantic only) |
@@ -70,7 +76,10 @@ searches memory only through the `MemorySearcher` protocol, so opening memory st
 same rules (no CLI, doctor, providers, decisions, network); earlier stages never import
 later ones (discovery ↛ classification/budget, classification ↛ budget), and the budget
 reads the library only to get an artifact body (guards in `test_context_discovery.py`,
-`test_library_isolation.py`).
+`test_library_isolation.py`). V1.4: only `context/escalation/planner.py` imports the LLM
+contract and its composition (`providers.base`, `providers.registry`,
+`providers.resolution`), never an adapter module; no earlier stage imports
+`context/escalation/` (same guards).
 
 ## Main flows
 
@@ -306,6 +315,36 @@ harness context budget "<instruction>" [--intent] [--ref] [--content]
 
 No Jev, no LLM, no reclassification, no truncation, no prompt rendering.
 
+**LLM Context Escalation (V1.4)**
+
+```text
+harness context plan "<instruction>" [--intent] [--ref] [--content]
+  (same discovery + classification + budget as above) → ContextBudgetResult (kept as is)
+  escalation.enabled ? open_context_planner(config) (failure → reason, not an error) : none
+    escalation.model None ─> ProviderNotEnabledError · alias → ModelResolver.resolve
+    (provider disabled → ProviderNotEnabledError) · no adapter → build_llm_adapter
+    → ProviderNotFoundError (no LLM adapter before V2.x)
+  build_escalation(config, planner=…).escalate(budget):
+    EscalationEvaluator (deterministic, context.yaml escalation.triggers):
+      architectural_task · multiple_domains · low_confidence · too_many_relevant_candidates
+      · source_conflict · required_overflow · required_unavailable
+    no trigger ────────────────────────────> NOT_REQUIRED, 0 LLM calls
+    harness_constraints (overflow, unavailable, source/limit conflicts)
+    no planner ────────────────────────────> FAILED planner_unavailable, 0 calls
+    prepare_input: allow-listed metadata (never content); unsafe candidate → withheld
+      (+ constraint); unsafe instruction or final prompt ─> FAILED unsafe_input, 0 calls
+    LLMProvider.complete(LLMRequest(model=<model_id>, prompt))
+      ProviderError ───────────────────────> FAILED provider_error, 1 call
+    parse_response (one JSON object, strict schema) → validate_plan (ids known, REQUIRED
+      not omitted, REQUIRED first, withheld REQUIRED added, plan_violations replay)
+      invalid ─────────────────────────────> FAILED invalid_output, 1 call
+      valid ───────────────────────────────> PLANNED: ContextPlan + PlannerCall metadata
+  CLI: JSON {summary, …result} (budget item text only with --content);
+       exit 0 when nothing is open, 3 when FAILED / unresolved constraint / budget failure
+```
+
+The plan never reclassifies and is not a prompt; on any failure the V1.3 result stands.
+
 ## Decisions (V0)
 
 1. **`engineering/` is the portable harness root.** It holds the package, `config/`,
@@ -488,6 +527,36 @@ Rationale and alternatives: [`sprints/sprint-v1.3.md`](sprints/sprint-v1.3.md).
 9. **CLI exit 3** for REQUIRED_OVERFLOW / REQUIRED_UNAVAILABLE (escalation needed; the
    JSON is still printed), mirroring `decision`'s fallback exit code.
 
+## Decisions (V1.4)
+
+Rationale and alternatives: [`sprints/sprint-v1.4.md`](sprints/sprint-v1.4.md).
+
+1. **Whether to escalate is deterministic**: triggers read only V1.0–V1.3 data; the LLM is
+   never asked whether to call the LLM. No trigger → no call (tested).
+2. **Only data-backed triggers**: declared intent, relevant specialties, low-confidence
+   decisions, HIGH_VALUE count, discovery `merge_conflicts`, REQUIRED overflow/unavailable.
+   High risk is **not** a trigger (no risk source before V9); `no_decision_layer` fallbacks
+   are configuration, not uncertainty.
+3. **Four thresholds**, each disableable; objective problems (overflow, unavailable,
+   source conflicts) always escalate.
+4. **LLMProvider via alias + ModelResolver**; no vendor name in code; no real LLM adapter
+   exists (V2.x), so the shipped `escalation.model` is `null` and escalations end
+   `FAILED planner_unavailable` with the deterministic result.
+5. **Metadata only, allow-listed** (`ContextPlanningInput`): no candidate content is sent;
+   `memory.safety` + `is_secret_name` withhold unsafe candidates (recorded) and block an
+   unsafe instruction or prompt (no call).
+6. **Structured output without a vendor feature**: one strict JSON object, extra keys
+   rejected, then deterministic invariants; no prose parsing or repair.
+7. **Validation twice**: `validate_plan` rejects; `ContextEscalationResult` re-checks
+   `plan_violations`, so no invalid plan is constructible.
+8. **The plan reorganises, never reclassifies or buys room**: REQUIRED first and complete,
+   budget replayed with V1.3 rules, whole items; truncation/chunking ideas are
+   `suggestions`, never executed.
+9. **Fallback = the V1.3 result**, always carried in the result; never another LLM, Jev or
+   an automatic human review. Failures are explicit (status + kind + detail + warning).
+10. **Three statuses** (NOT_REQUIRED, PLANNED, FAILED); "unresolved" is the plan's
+    `unresolved_constraints`, not a parallel state.
+
 ## Where to change things
 
 - New CLI command → `cli.py` (`@app.command()`), logic in its own module.
@@ -551,3 +620,14 @@ Rationale and alternatives: [`sprints/sprint-v1.3.md`](sprints/sprint-v1.3.md).
   `CategoryLimits` field (a test keeps them equal).
 - New candidate store → a branch in `ContextContentLoader.load` (`budget/content.py`).
 - Selection order inside a class → `priority_key` (`budget/budgeter.py`).
+- Escalation thresholds → `config/context.yaml` `escalation.triggers`; a new trigger → an
+  `EscalationReason` member, a method in `escalation/evaluator.py`, a field in
+  `EscalationTriggers` (only if it needs a threshold) + tests in
+  `test_context_escalation_evaluator.py`. Only when real data supports it.
+- Planner model → `escalation.model` (a `models.yaml` alias); a real LLM adapter (V2.x) →
+  module in `providers/`, its kind in `LLM_ADAPTER_KINDS` and a branch in
+  `build_llm_adapter` (`escalation/planner.py`).
+- What the planner sees → `ContextPlanningInput` / `prepare_input` (`escalation/planning.py`);
+  the prompt text → `_INSTRUCTIONS`. What it may answer → `PlannerResponse`
+  (`escalation/validation.py`). What any plan must respect → `plan_violations`
+  (`escalation/invariants.py`).

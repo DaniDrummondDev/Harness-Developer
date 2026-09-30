@@ -516,6 +516,10 @@ def _imports(path: Path) -> set[str]:
 # V1.2: the probabilistic classifier may use the decision layer's typed contracts
 # (never an adapter, the service, a registry or the network); nothing else may.
 DECISION_CONTRACTS = {"orchestrator.decisions.models", "orchestrator.providers.base"}
+# V1.4: the context planner uses the LLM contract through the model resolver and the
+# registry (composition); never an adapter module (fake, jev), a service or the network.
+LLM_CONTRACTS = {"orchestrator.providers.base", "orchestrator.providers.registry",
+                 "orchestrator.providers.resolution"}
 
 
 def test_context_does_not_know_interfaces_providers_decisions_or_network() -> None:
@@ -524,11 +528,14 @@ def test_context_does_not_know_interfaces_providers_decisions_or_network() -> No
                  "orchestrator.memory.mem0", "orchestrator.memory.fake", "typer", "rich",
                  "urllib", "http", "socket", "subprocess", "orchestrator.utils.shell")
     probabilistic = PACKAGE / "context" / "classification" / "probabilistic.py"
+    planner = PACKAGE / "context" / "escalation" / "planner.py"
+    allowances = {probabilistic: DECISION_CONTRACTS, planner: LLM_CONTRACTS}
     for path in (PACKAGE / "context").rglob("*.py"):
-        allowed = DECISION_CONTRACTS if path == probabilistic else set()
+        allowed = allowances.get(path, set())
         leaked = {n for n in _imports(path) if n.startswith(forbidden)} - allowed
         assert not leaked, f"{path} imports {leaked}"
     assert DECISION_CONTRACTS <= _imports(probabilistic)
+    assert LLM_CONTRACTS <= _imports(planner)
 
 
 def test_context_uses_no_execution_primitives() -> None:
@@ -540,10 +547,14 @@ def test_context_uses_no_execution_primitives() -> None:
 
 
 def test_earlier_context_stages_never_import_later_ones() -> None:
-    """V1.1 discovery knows neither classification nor budget; V1.2 knows no budget (V1.3)."""
+    """V1.1 discovery knows no later stage; V1.2 knows no budget (V1.3) nor escalation
+    (V1.4); the budget knows no escalation."""
+    escalation = "orchestrator.context.escalation"
     later = {
-        PACKAGE / "context": ("orchestrator.context.classification", "orchestrator.context.budget"),
-        PACKAGE / "context" / "classification": ("orchestrator.context.budget",),
+        PACKAGE / "context": ("orchestrator.context.classification", "orchestrator.context.budget",
+                              escalation),
+        PACKAGE / "context" / "classification": ("orchestrator.context.budget", escalation),
+        PACKAGE / "context" / "budget": (escalation,),
     }
     for directory, forbidden in later.items():
         for path in directory.glob("*.py"):

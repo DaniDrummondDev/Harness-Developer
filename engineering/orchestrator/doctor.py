@@ -48,6 +48,13 @@ budget `context budget` will apply (unit, total, reserve, usable, category and
 item limits); WARN when a category limit can never bind (>= usable). It never
 loads content, selects, reads the repository or calls a provider.
 
+`escalation` (V1.4) runs with `context`: structural and offline. It reports the
+triggers and the planner model `context plan` will use: PASS when disabled, when
+no planner model is set or its provider is disabled (escalations keep the
+deterministic result); FAIL when the alias points to a decision-only provider
+(jev); WARN when the provider is enabled but has no LLM adapter yet. It never
+opens an adapter, calls a provider or plans.
+
 To add a check: write `def check_x(...) -> CheckResult`, call it from
 `run_doctor`, and add a test in tests/unit/test_doctor.py.
 """
@@ -70,6 +77,7 @@ from orchestrator.config import (
     resolve_harness_root,
 )
 from orchestrator.context.discovery import check_discovery_paths
+from orchestrator.context.escalation.planner import DECISION_ONLY_KINDS, LLM_ADAPTER_KINDS
 from orchestrator.core.exceptions import CommandError, HarnessError
 from orchestrator.decisions.models import HealthStatus as DecisionHealthStatus
 from orchestrator.decisions.service import DecisionService, open_decisions
@@ -294,6 +302,45 @@ def check_budget(config: HarnessConfig) -> CheckResult:
     return CheckResult("budget", CheckStatus.PASS, detail)
 
 
+def check_escalation(config: HarnessConfig) -> CheckResult:
+    """Structural only: the triggers and planner model `context plan` will use. Never
+    opens an adapter, calls a provider or plans. The alias exists (config load
+    guarantees it); FAIL when it points to a decision-only provider (e.g. jev), WARN
+    when its provider is enabled but has no LLM adapter in this version."""
+    settings = config.context.escalation
+    if not settings.enabled:
+        return CheckResult("escalation", CheckStatus.PASS,
+                           "disabled: `context plan` keeps the deterministic budget result")
+    triggers = settings.triggers
+    detail = (
+        f"triggers: intents {', '.join(triggers.architectural_intents) or 'none'}; "
+        f"min_specialties {triggers.min_specialties}; max_high_value {triggers.max_high_value}; "
+        f"min_low_confidence {triggers.min_low_confidence}; source conflicts, "
+        "REQUIRED overflow/unavailable always"
+    )
+    alias = settings.model
+    if alias is None:
+        return CheckResult("escalation", CheckStatus.PASS,
+                           f"{detail}; no planner model: escalations are recorded as "
+                           "planner_unavailable and the deterministic budget result stands")
+    model = config.models[alias]
+    provider = config.providers[model.provider]
+    where = f"planner '{alias}' -> {model.provider} (kind {provider.kind}) / {model.model_id}"
+    if provider.kind in DECISION_ONLY_KINDS:
+        return CheckResult("escalation", CheckStatus.FAIL,
+                           f"{detail}; {where}: kind '{provider.kind}' is a decision provider, "
+                           "not an LLM")
+    if not provider.enabled:
+        return CheckResult("escalation", CheckStatus.PASS,
+                           f"{detail}; {where} is disabled: escalations keep the deterministic "
+                           "budget result")
+    if provider.kind not in LLM_ADAPTER_KINDS:
+        return CheckResult("escalation", CheckStatus.WARN,
+                           f"{detail}; {where}: no LLM adapter for kind '{provider.kind}' yet "
+                           "(V2.x); escalations keep the deterministic budget result")
+    return CheckResult("escalation", CheckStatus.PASS, f"{detail}; {where}")
+
+
 def check_git_executable(runner: CommandRunner) -> tuple[CheckResult, bool]:
     try:
         result = runner(["git", "--version"], timeout=GIT_TIMEOUT_SECONDS)
@@ -393,6 +440,7 @@ def run_doctor(
                 _guarded("classification", lambda: check_classification(context_cfg))
             )
             results.append(_guarded("budget", lambda: check_budget(context_cfg)))
+            results.append(_guarded("escalation", lambda: check_escalation(context_cfg)))
 
     # Independent of the harness root: the library belongs to the installation.
     results.append(_guarded("library", lambda: check_library(library_root, environ)))

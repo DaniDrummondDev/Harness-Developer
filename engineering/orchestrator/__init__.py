@@ -31,8 +31,16 @@ and max_files/max_adrs/max_memories limits): REQUIRED always, then HIGH_VALUE,
 then OPTIONAL, EXCLUDED never; REQUIRED that does not fit is an explicit status,
 never dropped. `context budget` and a structural `budget` doctor check. No
 prompt rendering.
+V1.4 (LLM Context Escalation): `orchestrator/context/escalation/` evaluates
+deterministic triggers over the budget result (declared architectural intent,
+multiple specialties, low-confidence decisions, too many HIGH_VALUE, source
+conflicts, REQUIRED overflow/unavailable) and, only when one fires, asks the
+planner model (alias -> ModelResolver -> LLMProvider) for a ContextPlan built
+from safety-checked metadata, then validates it deterministically (REQUIRED
+kept, EXCLUDED never, no unknown ids, no reclassification, budget replayed).
+Any failure keeps the V1.3 result. `context plan` and an `escalation` doctor check.
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 HARNESS_NAME = "AI Engineering Harness"

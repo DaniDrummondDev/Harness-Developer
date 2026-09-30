@@ -2,7 +2,7 @@
 
 ## 1. Objetivo
 
-Este documento descreve a arquitetura atual e a estrutura de pastas do AI Engineering Harness após a conclusão do **V1.3 — Context Budget** (sobre o V1.2 — Context Classification, o V1.1 — Context Candidate Discovery e o V1 — Global Library).
+Este documento descreve a arquitetura atual e a estrutura de pastas do AI Engineering Harness após a conclusão do **V1.4 — LLM Context Escalation** (sobre o V1.3 — Context Budget, o V1.2 — Context Classification, o V1.1 — Context Candidate Discovery e o V1 — Global Library).
 
 Ele possui dois objetivos complementares:
 
@@ -98,9 +98,10 @@ V1   — Global Library           COMPLETE
 V1.1 — Context Candidate Discovery COMPLETE
 V1.2 — Context Classification  COMPLETE
 V1.3 — Context Budget          COMPLETE
+V1.4 — LLM Context Escalation  COMPLETE
 ```
 
-Próxima versão: **V1.4 — LLM Context Escalation** (não iniciada).
+Próxima versão: **V1.5 — Context Telemetry** (não iniciada).
 
 O projeto possui agora:
 
@@ -153,6 +154,15 @@ O projeto possui agora:
   (`REQUIRED_OVERFLOW` / `REQUIRED_UNAVAILABLE`), nunca é removido; cada candidato com
   motivo estruturado de entrada/saída; materialização lazy e segura do conteúdo;
 - comando `context budget` e check estrutural `budget` no `doctor`;
+- LLM Context Escalation (V1.4): `ContextBudgetResult` → `ContextEscalationResult`;
+  gatilhos **determinísticos** (intent arquitetural declarado, múltiplas specialties
+  relevantes, decisões abaixo do threshold, excesso de HIGH_VALUE, conflito de metadata
+  registrado pelo merge, `REQUIRED_OVERFLOW`, `REQUIRED_UNAVAILABLE`) decidem se a seleção
+  precisa de um modelo de raciocínio; só então o planner (alias lógico → `ModelResolver` →
+  `LLMProvider`) recebe metadata segura (nunca conteúdo) e propõe um `ContextPlan`, validado
+  deterministicamente (REQUIRED mantido, EXCLUDED nunca, ids conhecidos, sem
+  reclassificação, budget reaplicado); qualquer falha mantém o resultado do V1.3;
+- comando `context plan` e check estrutural `escalation` no `doctor`;
 - contract tests;
 - testes unitários e de integração (incluindo prova real opt-in contra Mem0 e contra Jev);
 - quality gates locais com pytest, Ruff e Mypy.
@@ -165,9 +175,11 @@ Ainda não estão implementados:
 - Decision Policy Engine (deterministic → Jev → LLM → human; V5);
 - fallback automático para LLM ou humano;
 - ingestão automática de memória;
-- ContextPlan, escalation LLM de contexto (V1.4), telemetria de contexto (V1.5), truncation
-  parcial, sumarização, chunking semântico, renderização de prompt/context package;
-  classificação via reasoning LLM (não há runtime LLM real);
+- adapter LLM real para o planner de contexto (a escalation do V1.4 roda com provider de
+  teste; sem adapter, uma escalation termina `FAILED planner_unavailable` com o resultado
+  determinístico); gatilho de alto risco (sem fonte de risco até o V9);
+- telemetria de contexto (V1.5), truncation parcial, sumarização, chunking semântico,
+  renderização de prompt/context package; classificação via reasoning LLM;
 - descoberta de task/sprint contracts, Git, previous runs, releases e findings (sem store real);
 - composição Global Library + conhecimento específico do projeto;
 - agent execution;
@@ -216,7 +228,7 @@ engineering/orchestrator/
 
 ---
 
-## 5. Estrutura real após o V1.3
+## 5. Estrutura real após o V1.4
 
 A estrutura funcional atualmente implementada é:
 
@@ -264,7 +276,7 @@ engineering/
 │   │   ├── loader.py         # resolve_library_root; discover/read/parse/validate
 │   │   └── library.py        # GlobalLibrary: index, by_type, get, resolve
 │   │
-│   ├── context/              # V1.1: discovery; V1.2: classification; V1.3: budget
+│   ├── context/              # V1.1: discovery; V1.2: classification; V1.3: budget; V1.4: escalation
 │   │   ├── __init__.py
 │   │   ├── models.py         # CandidateKind, ContextCandidate, Provenance(match), ContextDiscoveryResult
 │   │   ├── files.py          # ProjectFiles: roots contidas, walks limitados, exclusões
@@ -276,11 +288,19 @@ engineering/
 │   │   │   ├── deterministic.py  # ClassificationRule table, DeterministicClassifier
 │   │   │   ├── probabilistic.py  # Decider protocol, ProbabilisticClassifier (Jev via DecisionService)
 │   │   │   └── classifier.py     # ContextClassifier, build_classifier
-│   │   └── budget/           # V1.3
+│   │   ├── budget/           # V1.3
+│   │   │   ├── __init__.py
+│   │   │   ├── models.py         # BudgetCategory, BudgetStatus, BudgetReason, BudgetedItem, result
+│   │   │   ├── content.py        # ContentLoader protocol, ContextContentLoader (referência → texto seguro)
+│   │   │   └── budgeter.py       # ContextBudgeter (política de seleção), priority_key, build_budgeter
+│   │   └── escalation/       # V1.4
 │   │       ├── __init__.py
-│   │       ├── models.py         # BudgetCategory, BudgetStatus, BudgetReason, BudgetedItem, result
-│   │       ├── content.py        # ContentLoader protocol, ContextContentLoader (referência → texto seguro)
-│   │       └── budgeter.py       # ContextBudgeter (política de seleção), priority_key, build_budgeter
+│   │       ├── models.py         # EscalationReason, ContextEscalationDecision, ContextPlan, result
+│   │       ├── invariants.py     # PlanningRole, plan_violations (invariantes de qualquer plano)
+│   │       ├── evaluator.py      # EscalationEvaluator (gatilhos determinísticos)
+│   │       ├── planning.py       # ContextPlanningInput (allow-list segura), constraints, prompt
+│   │       ├── validation.py     # PlannerResponse (schema estrito), validate_plan
+│   │       └── planner.py        # ContextPlanner (LLMProvider), ContextEscalation, composição
 │   │
 │   └── utils/
 │       ├── files.py
@@ -336,7 +356,7 @@ engineering/
 └── README.md
 ```
 
-A árvore acima representa o estado funcional pós-V1.3.
+A árvore acima representa o estado funcional pós-V1.4.
 
 Diretórios futuros devem ser adicionados somente quando a versão correspondente os exigir.
 
@@ -355,7 +375,8 @@ Não deve conter configuração específica de um projeto consumidor.
 Responsável pela interface CLI atual.
 
 A CLI existente suporta os comandos já implementados pelo projeto: `doctor`, `intake`, o grupo `memory` (V0.3), o grupo `decision` (V0.4: classify, route, severity, relevance, health), o grupo `library` (V1: inspect, resolve) e o grupo `context` (V1.1: discover; V1.2: classify; V1.3: budget — exit 3 em
-`REQUIRED_OVERFLOW`/`REQUIRED_UNAVAILABLE`).
+`REQUIRED_OVERFLOW`/`REQUIRED_UNAVAILABLE`; V1.4: plan — exit 3 quando a escalation falha
+ou resta constraint não resolvida).
 
 Ela deve permanecer fina.
 
@@ -471,6 +492,12 @@ categoria e de itens); WARN se um limite de categoria for ≥ usable (nunca rest
 materializa conteúdo, seleciona, lê o repositório nem chama provider (invariantes inválidas
 já falham em `config_valid`).
 
+Check `escalation` (V1.4): executado junto com `context`; estrutural e offline. Informa os
+gatilhos e o modelo planner que `context plan` usará. PASS quando desabilitado, sem modelo
+ou com provider desabilitado (escalations mantêm o resultado determinístico); FAIL quando o
+alias aponta para um provider só de decisão (jev); WARN quando o provider está habilitado
+mas não há adapter LLM (V2.x). Nunca abre adapter, chama provider ou planeja.
+
 ### `orchestrator/core/exceptions.py`
 
 Define erros tipados do Harness, incluindo erros de configuração, request e provider.
@@ -548,7 +575,8 @@ Não seleciona, classifica nem orça contexto.
 ### `orchestrator/context/`
 
 V1.1: Context Candidate Discovery. V1.2: Context Classification (`context/classification/`).
-V1.3: Context Budget (`context/budget/`). Cada estágio consome o resultado do anterior e
+V1.3: Context Budget (`context/budget/`). V1.4: LLM Context Escalation
+(`context/escalation/`). Cada estágio consome o resultado do anterior e
 nunca importa um estágio posterior (guard de arquitetura).
 
 ```text
@@ -633,6 +661,31 @@ diretórios excluídos, sem nomes de secrets, ≤ `max_file_bytes`), leitura lim
 binário, UTF-8 estrito; artefato da biblioteca via corpo já carregado (sem reparse); memória
 via excerpt (sem alterar `MemoryProvider`). Sem Jev, LLM, reclassificação ou renderização de
 prompt. Política e exemplos: `engineering/docs/sprints/sprint-v1.3.md`.
+
+LLM Context Escalation (V1.4):
+
+```text
+ContextBudgetResult (mantido intacto)
+  → EscalationEvaluator (determinístico; context.yaml escalation.triggers)
+       sem gatilho → NOT_REQUIRED, 0 chamadas LLM
+  → harness_constraints (overflow, unavailable, conflitos de fonte/limite)
+  → sem planner → FAILED planner_unavailable (0 chamadas)
+  → ContextPlanningInput: allow-list de metadata (nunca conteúdo); candidato inseguro
+       (memory.safety / nome de secret) → withheld + constraint; instrução ou prompt
+       inseguro → FAILED unsafe_input (0 chamadas)
+  → LLMProvider.complete (alias → ModelResolver → provider → model id)
+       ProviderError → FAILED provider_error (1 chamada)
+  → parse (um objeto JSON, schema estrito) → validate_plan → plan_violations
+       inválido → FAILED invalid_output (1 chamada) · válido → PLANNED + ContextPlan
+  → ContextEscalationResult(budget, escalation, status, constraints, plan, failure, call)
+```
+
+O plano não reclassifica, não remove REQUIRED, não seleciona EXCLUDED/indisponível/não
+medido, não esconde overflow e não é prompt; truncation/chunking sugeridos pelo planner são
+registrados como `suggestions`, nunca executados. Fallback = resultado do V1.3 (nunca outra
+LLM, Jev ou humano automático). Só `escalation/planner.py` importa o contrato LLM e sua
+composição (`providers.base/registry/resolution`); nenhum estágio anterior importa
+`escalation/`. Gatilhos, schema e segurança: `engineering/docs/sprints/sprint-v1.4.md`.
 
 ### `orchestrator/utils/shell.py`
 
@@ -896,7 +949,8 @@ Exemplos:
 - `models.yaml` agora possui consumidor real;
 - `modes.yaml` possui consumidor real;
 - `memory.yaml` possui consumidor real (V0.3: `open_memory`, CLI `memory`, `doctor`), desabilitado por padrão;
-- `context.yaml` possui consumidor real (V1.1 discovery, V1.2 classification, V1.3 budget);
+- `context.yaml` possui consumidor real (V1.1 discovery, V1.2 classification, V1.3 budget,
+  V1.4 escalation);
 - `decisions.yaml` possui consumidor real (V0.4: `open_decisions`, CLI `decision`, `doctor`):
   `model` (alias → Jev) e `thresholds.minimum_confidence`; Jev desabilitado por padrão.
   `escalation_order` continua declarativo até o V5.
@@ -933,6 +987,11 @@ A fundação já valida:
   (≥ 0 e < `total`, default 20000), `categories` (caracteres por categoria, ≥ 0 ou ausente;
   categorias desconhecidas rejeitadas), `max_files` (20), `max_adrs` (5), `max_memories`
   (5), todos ≥ 0. Campos extras rejeitados.
+- `context.yaml` (V1.4): seção `escalation` com `enabled` (default true), `model` (alias de
+  `models.yaml` ou null — referência validada entre arquivos) e `triggers`:
+  `architectural_intents` (intents únicos, nunca `unclassified`; default `[plan]`),
+  `min_specialties` (≥ 2 ou null), `max_high_value` (≥ 1 ou null), `min_low_confidence`
+  (≥ 1 ou null). Campos extras rejeitados.
 
 A Global Library não é configuração: seus artefatos são validados pelo próprio loader
 (`orchestrator/library/`), com schema versionado próprio (`version: 1`).
@@ -1114,8 +1173,10 @@ insumo para a precedência `Policies > ADRs > Task > Project guidelines >
 Skills/specialties > ... > Memory`. O V1.2 criou `context/classification/`, que aplica essa
 precedência (policy aplicável → REQUIRED; memória nunca REQUIRED) e produz
 `ContextClassificationResult`. O V1.3 criou `context/budget/`, que o consome e produz
-`ContextBudgetResult` (seleção determinística, REQUIRED nunca removido); escalation (V1.4)
-e telemetry (V1.5) consumirão esses resultados.
+`ContextBudgetResult` (seleção determinística, REQUIRED nunca removido). O V1.4 criou
+`context/escalation/`, que avalia gatilhos determinísticos sobre esse resultado e, só quando
+necessário, obtém um `ContextPlan` validado via `LLMProvider`; telemetry (V1.5) consumirá
+esses resultados.
 
 ### `agents/`
 
@@ -1210,16 +1271,16 @@ Essa ordem substitui sequências anteriores presentes em versões antigas da doc
 
 ## 15. Próxima versão
 
-O V1.3 — Context Budget está COMPLETE (ver
-`engineering/docs/sprints/sprint-v1.3.md`).
+O V1.4 — LLM Context Escalation está COMPLETE (ver
+`engineering/docs/sprints/sprint-v1.4.md`).
 
 A próxima versão é:
 
 ```text
-V1.4 — LLM Context Escalation
+V1.5 — Context Telemetry
 ```
 
-O V1.4 ainda não foi iniciado.
+O V1.5 ainda não foi iniciado.
 
 ---
 
@@ -1476,6 +1537,27 @@ modelo: nenhum caminho de código consegue construir um REQUIRED descartado por 
 Nada é truncado; um item que não cabe é pulado e a varredura continua. Sem sumarização ou
 chunking semântico.
 
+### Escalar é decisão determinística (V1.4)
+
+Gatilhos leem apenas dados já produzidos (intent declarado, classes, evidência de decisão,
+metadata de merge, status/uso do budget) contra thresholds do `context.yaml`; a LLM nunca
+decide se deve ser chamada. Sem gatilho, nenhuma chamada. Alto risco não é gatilho (sem
+fonte de risco até o V9); fallback `no_decision_layer` é configuração, não incerteza.
+
+### Plano validado, nunca confiado (V1.4)
+
+A saída do planner é um único objeto JSON com schema estrito (sem campos extras, sem
+classificação), depois invariantes determinísticas (`plan_violations`): REQUIRED completo e
+primeiro, nada EXCLUDED/indisponível/não medido, ids conhecidos, budget reaplicado com as
+regras do V1.3. O próprio `ContextEscalationResult` revalida o plano. Falha → resultado do
+V1.3 + falha explícita.
+
+### Só metadata segura sai para o provider (V1.4)
+
+`ContextPlanningInput` é uma allow-list (nunca conteúdo de candidato); candidatos com
+metadata ou nome de arquivo com aparência de secret são retidos e registrados; instrução ou
+prompt inseguro cancela a chamada. Reusa `memory.safety` e `is_secret_name`.
+
 ### Alias lógico separado do model id externo
 
 Configuração pode referenciar modelos semanticamente sem acoplar o core ao identificador do vendor.
@@ -1560,6 +1642,26 @@ Identificadas no V1.3:
   são bloqueados, como no discovery);
 - arquivo binário citado explicitamente vira REQUIRED no V1.2 e, portanto,
   `REQUIRED_UNAVAILABLE` no V1.3 (correto, mas bloqueia o pacote até escalation).
+- ~~conteúdo selecionado não passa por varredura de secrets~~ para envio externo (V1.4:
+  nenhum conteúdo é enviado ao planner; metadata é verificada). O conteúdo selecionado em si
+  continua sem varredura até existir renderização de prompt (V2).
+
+Identificadas no V1.4:
+
+- não há adapter LLM real: o planner só roda com provider injetado (testes); com a
+  configuração padrão toda escalation termina `FAILED planner_unavailable`;
+- o planner vê apenas metadata (ids, títulos, tamanhos, classes), não conteúdo nem
+  excerpts: decide com pouca semântica; enviar excerpts exigirá política de redação;
+- `LLMProvider` não tem structured output nativo nem timeout no contrato: o JSON é exigido
+  pelo prompt e validado estritamente; timeout depende do adapter;
+- `architectural_task` depende do intent declarado (`--intent plan`); requests
+  `unclassified` nunca disparam esse gatilho;
+- `multiple_domains` conta specialties REQUIRED/HIGH_VALUE, que hoje vêm do perfil do
+  projeto (stack/capabilities) e não do texto da tarefa, salvo com Jev habilitado;
+- `source_conflict` cobre só conflitos de metadata registrados no merge; conflito semântico
+  entre documentos não é detectado;
+- thresholds (3/12/3) não calibrados (dependem da telemetria do V1.5);
+- a varredura de secrets é heurística (mesmas limitações do V0.3).
 
 Não devem ser resolvidos preventivamente sem necessidade real.
 
@@ -1617,19 +1719,22 @@ Context Classification (REQUIRED / HIGH_VALUE / OPTIONAL / EXCLUDED; determinist
         ↓
 Context Budget (characters, reserve, category/item limits; REQUIRED never dropped)
         ↓
-Ready for LLM Context Escalation (V1.4)
+LLM Context Escalation (deterministic triggers; validated ContextPlan via LLMProvider; fallback = budget)
+        ↓
+Ready for Context Telemetry (V1.5)
 ```
 
 O Harness já lista, classifica e seleciona, para uma requisição, o contexto que cabe num
-orçamento determinístico, com o motivo de entrada/saída de cada item; nada ainda injeta
-contexto em prompts nem escala a seleção para uma LLM.
+orçamento determinístico, com o motivo de entrada/saída de cada item, e decide
+deterministicamente quando essa seleção precisa de um planner LLM, cujo plano só é aceito
+após validação; nada ainda injeta contexto em prompts.
 
 Ainda não existe provider externo real de inferência generativa.
 
 A memória operacional existe, mas é operada apenas explicitamente e nunca é source of truth.
 
-Context Engineering existe até o budget (V1.1–V1.3); escalation LLM, pacote de contexto
-renderizado e telemetria de contexto ainda não.
+Context Engineering existe até a escalation (V1.1–V1.4); pacote de contexto renderizado,
+telemetria de contexto e adapter LLM real ainda não.
 
 O decision provider real (Jev) existe como camada probabilística isolada; não há Decision
 Policy Engine e nenhum fallback é executado automaticamente.
